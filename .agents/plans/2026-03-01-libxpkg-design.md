@@ -562,8 +562,8 @@ run_hook(HookType::Install, ctx)
 
 ## 参考资料
 
-- xim 实现：`/home/speak/workspace/github/d2learn/xlings/core/xim/`
-- 包索引仓库：`/home/speak/workspace/github/d2learn/xim-pkgindex/`
-- lua 库：`/home/speak/workspace/github/mcpplibs/lua/`
-- xpackage 规范文档：`/home/speak/workspace/github/d2learn/xim-pkgindex/docs/V1/xpackage-spec.md`
+- xim 实现：`/home/<user>/workspace/github/d2learn/xlings/core/xim/`
+- 包索引仓库：`/home/<user>/workspace/github/d2learn/xim-pkgindex/`
+- lua 库：`/home/<user>/workspace/github/mcpplibs/lua/`
+- xpackage 规范文档：`/home/<user>/workspace/github/d2learn/xim-pkgindex/docs/V1/xpackage-spec.md`
 - [mcpp-style-ref | 现代C++编码/项目风格参考](https://github.com/mcpp-community/mcpp-style-ref)

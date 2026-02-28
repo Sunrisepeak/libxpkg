@@ -10,8 +10,8 @@
 
 **Reference:**
 - Design doc: `.agents/plans/2026-03-01-libxpkg-design.md`
-- Real packages: `/home/speak/workspace/github/d2learn/xim-pkgindex/pkgs/`
-- xim Lua sources: `/home/speak/workspace/github/d2learn/xlings/core/xim/libxpkg/`
+- Real packages: `/home/<user>/workspace/github/d2learn/xim-pkgindex/pkgs/`
+- xim Lua sources: `/home/<user>/workspace/github/d2learn/xlings/core/xim/libxpkg/`
 
 ---
 
@@ -865,7 +865,7 @@ namespace fs = std::filesystem;
 // Set via environment variable XPKG_TEST_PKG or use fallback
 static fs::path test_pkg_path() {
     if (auto* p = std::getenv("XPKG_TEST_PKG")) return p;
-    return "/home/speak/workspace/github/d2learn/xim-pkgindex/pkgs/m/mdbook.lua";
+    return "/home/<user>/workspace/github/d2learn/xim-pkgindex/pkgs/m/mdbook.lua";
 }
 
 TEST(ExecutorTest, CreateExecutor_ExistingFile) {
@@ -1160,7 +1160,7 @@ using namespace mcpplibs::xpkg;
 namespace fs = std::filesystem;
 
 static constexpr auto PKGINDEX =
-    "/home/speak/workspace/github/d2learn/xim-pkgindex";
+    "/home/<user>/workspace/github/d2learn/xim-pkgindex";
 
 TEST(LoaderTest, LoadPackage_Mdbook) {
     auto result = load_package(
@@ -1430,7 +1430,7 @@ namespace fs = std::filesystem;
 
 static PackageIndex build_test_index() {
     auto result = build_index(
-        "/home/speak/workspace/github/d2learn/xim-pkgindex");
+        "/home/<user>/workspace/github/d2learn/xim-pkgindex");
     return result.value_or(PackageIndex{});
 }
 

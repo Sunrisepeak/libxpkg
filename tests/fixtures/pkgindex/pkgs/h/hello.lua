@@ -19,32 +19,32 @@ package = {
             ["latest"] = { ref = "1.0.0" },
             ["1.0.0"]  = {
                 url    = "https://example.com/hello-1.0.0-linux.tar.gz",
-                sha256 = "0000000000000000000000000000000000000000000000000000000000000000"
+                sha256 = "0000000000000000000000000000000000000000000000000000000000000000" -- intentionally fake: fixture package is never downloaded
             },
         },
         windows = {
             ["latest"] = { ref = "1.0.0" },
             ["1.0.0"]  = {
                 url    = "https://example.com/hello-1.0.0-windows.zip",
-                sha256 = "0000000000000000000000000000000000000000000000000000000000000000"
+                sha256 = "0000000000000000000000000000000000000000000000000000000000000000" -- intentionally fake: fixture package is never downloaded
             },
         },
         macosx = {
             ["latest"] = { ref = "1.0.0" },
             ["1.0.0"]  = {
                 url    = "https://example.com/hello-1.0.0-macosx.tar.gz",
-                sha256 = "0000000000000000000000000000000000000000000000000000000000000000"
+                sha256 = "0000000000000000000000000000000000000000000000000000000000000000" -- intentionally fake: fixture package is never downloaded
             },
         },
     },
 }
 
-import("xim.libxpkg.pkginfo")
-import("xim.libxpkg.xvm")
+local pkginfo = import("xim.libxpkg.pkginfo")
+local xvm     = import("xim.libxpkg.xvm")
 
 local MARKER = "hello.installed"
 
--- installed(): return version string if marker file exists, else nil
+-- installed(): return version string read from marker file, or "1.0.0" as fallback when marker exists but is unreadable, or nil if absent
 function installed()
     local dir = pkginfo.install_dir()
     if not dir then return nil end
@@ -64,7 +64,8 @@ end
 function install()
     local dir = pkginfo.install_dir()
     if not dir then return false end
-    os.execute("mkdir -p " .. dir)
+    local ok = os.execute('mkdir -p "' .. dir .. '"')
+    if not ok then return false end
     local f = io.open(dir .. "/" .. MARKER, "w")
     if not f then return false end
     f:write("1.0.0\n"); f:close()
@@ -73,7 +74,9 @@ end
 
 -- config(): register with xvm
 function config()
-    xvm.add("hello")
+    local dir = pkginfo.install_dir()
+    if not dir then return false end
+    xvm.add("hello", { bindir = dir })
     return true
 end
 
@@ -81,6 +84,6 @@ end
 function uninstall()
     local dir = pkginfo.install_dir()
     if dir then os.remove(dir .. "/" .. MARKER) end
-    xvm.remove("hello")
+    if xvm.has("hello") then xvm.remove("hello") end
     return true
 end

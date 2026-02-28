@@ -67,23 +67,36 @@ bool load_stdlib(lua::State* L, std::string& err_out) {
     };
 
     for (auto& m : mods) {
-        // Execute module source; leaves return value (the module table) on stack
-        if (lua::L_dostring(L, std::string(m.src).c_str()) != lua::OK) {
-            err_out = std::string("failed to load module ") + m.name + ": "
+        // Load and compile the module source
+        if (lua::L_loadstring(L, m.src.data()) != lua::OK) {
+            err_out = std::string("failed to compile module ") + m.name + ": "
                     + lua::tostring(L, -1);
             lua::pop(L, 1);
             return false;
         }
-        // _LIBXPKG_MODULES[name] = <module table>
-        lua::getglobal(L, "_LIBXPKG_MODULES");  // push modules table
-        lua::insert(L, -2);                      // move module table below modules table
-        lua::setfield(L, -2, m.name);            // modules[name] = module; pops module
-        lua::pop(L, 1);                          // pop modules table
+        // Execute the chunk, requesting 1 return value (the module table)
+        if (lua::pcall(L, 0, 1, 0) != lua::OK) {
+            err_out = std::string("failed to run module ") + m.name + ": "
+                    + lua::tostring(L, -1);
+            lua::pop(L, 1);
+            return false;
+        }
+        // Stack: [module_table]
+        // Store into _LIBXPKG_MODULES[name]
+        lua::getglobal(L, "_LIBXPKG_MODULES");  // stack: [module_table, modules]
+        lua::insert(L, -2);                      // stack: [modules, module_table]
+        lua::setfield(L, -2, m.name);            // modules[name] = module_table; stack: [modules]
+        lua::pop(L, 1);                          // stack: []
     }
 
     // Load prelude: defines import(), os.*, path.*, etc.
-    if (lua::L_dostring(L, std::string(detail::prelude_lua).c_str()) != lua::OK) {
+    if (lua::L_loadstring(L, detail::prelude_lua.data()) != lua::OK) {
         err_out = "failed to load prelude: " + std::string(lua::tostring(L, -1));
+        lua::pop(L, 1);
+        return false;
+    }
+    if (lua::pcall(L, 0, 0, 0) != lua::OK) {
+        err_out = "failed to run prelude: " + std::string(lua::tostring(L, -1));
         lua::pop(L, 1);
         return false;
     }
@@ -113,6 +126,14 @@ void inject_context(lua::State* L, const mcpplibs::xpkg::ExecutionContext& ctx) 
         lua::rawseti(L, -2, i + 1);
     }
     lua::setfield(L, -2, "deps_list");
+
+    // args as array table
+    lua::newtable(L);
+    for (int i = 0; i < (int)ctx.args.size(); ++i) {
+        lua::pushstring(L, ctx.args[i].c_str());
+        lua::rawseti(L, -2, i + 1);
+    }
+    lua::setfield(L, -2, "args");
 
     lua::setglobal(L, "_RUNTIME");
 }

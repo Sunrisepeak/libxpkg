@@ -6,12 +6,15 @@ import mcpplibs.xpkg.executor;
 using namespace mcpplibs::xpkg;
 namespace fs = std::filesystem;
 
-// Path to a real package from xim-pkgindex
-static const fs::path MDBOOK_PKG =
-    "/home/speak/workspace/github/d2learn/xim-pkgindex/pkgs/m/mdbook.lua";
+#ifndef XPKG_TEST_PKGINDEX
+#  define XPKG_TEST_PKGINDEX "tests/fixtures/pkgindex"
+#endif
+
+static const fs::path HELLO_PKG =
+    fs::path(XPKG_TEST_PKGINDEX) / "pkgs/h/hello.lua";
 
 TEST(ExecutorTest, CreateExecutor_ExistingFile) {
-    auto result = create_executor(MDBOOK_PKG);
+    auto result = create_executor(HELLO_PKG);
     EXPECT_TRUE(result.has_value()) << (result ? "" : result.error());
 }
 
@@ -21,26 +24,26 @@ TEST(ExecutorTest, CreateExecutor_MissingFile) {
 }
 
 TEST(ExecutorTest, HasHook_Install) {
-    auto exec = create_executor(MDBOOK_PKG);
+    auto exec = create_executor(HELLO_PKG);
     ASSERT_TRUE(exec.has_value());
     EXPECT_TRUE(exec->has_hook(HookType::Install));
 }
 
 TEST(ExecutorTest, HasHook_Config) {
-    auto exec = create_executor(MDBOOK_PKG);
+    auto exec = create_executor(HELLO_PKG);
     ASSERT_TRUE(exec.has_value());
     EXPECT_TRUE(exec->has_hook(HookType::Config));
 }
 
 TEST(ExecutorTest, HasHook_Uninstall) {
-    auto exec = create_executor(MDBOOK_PKG);
+    auto exec = create_executor(HELLO_PKG);
     ASSERT_TRUE(exec.has_value());
     EXPECT_TRUE(exec->has_hook(HookType::Uninstall));
 }
 
-TEST(ExecutorTest, HasHook_Installed_False) {
-    auto exec = create_executor(MDBOOK_PKG);
+TEST(ExecutorTest, HasHook_Installed_True) {
+    auto exec = create_executor(HELLO_PKG);
     ASSERT_TRUE(exec.has_value());
-    // mdbook.lua does NOT have installed() hook
-    EXPECT_FALSE(exec->has_hook(HookType::Installed));
+    // hello.lua has an installed() hook (unlike the old mdbook fixture)
+    EXPECT_TRUE(exec->has_hook(HookType::Installed));
 }

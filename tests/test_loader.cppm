@@ -10,18 +10,21 @@ import mcpplibs.xpkg.loader;
 using namespace mcpplibs::xpkg;
 namespace fs = std::filesystem;
 
-static constexpr std::string_view PKGINDEX =
-    "/home/speak/workspace/github/d2learn/xim-pkgindex";
+#ifndef XPKG_TEST_PKGINDEX
+#  define XPKG_TEST_PKGINDEX "tests/fixtures/pkgindex"
+#endif
+
+static const fs::path PKGINDEX{ XPKG_TEST_PKGINDEX };
 
 TEST(LoaderTest, LoadPackage_MissingFile) {
     auto result = load_package("/nonexistent/pkg.lua");
     EXPECT_FALSE(result.has_value());
 }
 
-TEST(LoaderTest, LoadPackage_Mdbook) {
-    auto result = load_package(fs::path(PKGINDEX) / "pkgs/m/mdbook.lua");
+TEST(LoaderTest, LoadPackage_Hello) {
+    auto result = load_package(PKGINDEX / "pkgs/h/hello.lua");
     ASSERT_TRUE(result.has_value()) << result.error();
-    EXPECT_EQ(result->name, "mdbook");
+    EXPECT_EQ(result->name, "hello");
     EXPECT_EQ(result->type, PackageType::Package);
     EXPECT_EQ(result->status, PackageStatus::Stable);
     EXPECT_FALSE(result->xpm.entries.empty());
@@ -29,14 +32,14 @@ TEST(LoaderTest, LoadPackage_Mdbook) {
 }
 
 TEST(LoaderTest, LoadPackage_HasLinuxPlatform) {
-    auto result = load_package(fs::path(PKGINDEX) / "pkgs/m/mdbook.lua");
+    auto result = load_package(PKGINDEX / "pkgs/h/hello.lua");
     ASSERT_TRUE(result.has_value());
     EXPECT_GT(result->xpm.entries.count("linux"), 0u);
 }
 
 TEST(LoaderTest, BuildIndex_ReturnsEntries) {
-    auto result = build_index(fs::path(PKGINDEX));
+    auto result = build_index(PKGINDEX);
     ASSERT_TRUE(result.has_value()) << result.error();
     EXPECT_GT(result->entries.size(), 0u);
-    EXPECT_GT(result->entries.count("mdbook"), 0u);
+    EXPECT_GT(result->entries.count("hello"), 0u);
 }

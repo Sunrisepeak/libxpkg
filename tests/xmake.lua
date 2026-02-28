@@ -14,6 +14,7 @@ target("xpkg_loader_test")
     add_files("main.cpp", "test_loader.cppm")
     add_deps("mcpplibs-xpkg", "mcpplibs-xpkg-loader")
     add_packages("gtest", "mcpplibs-capi-lua")
+    add_defines('XPKG_TEST_PKGINDEX="$(projectdir)/tests/fixtures/pkgindex"')
     set_policy("build.c++.modules", true)
 
 -- Index tests — mcpplibs.xpkg + mcpplibs.xpkg.index, pure C++
@@ -30,4 +31,5 @@ target("xpkg_executor_test")
     add_files("main.cpp", "test_executor.cpp")
     add_deps("mcpplibs-xpkg", "mcpplibs-xpkg-executor")
     add_packages("gtest", "mcpplibs-capi-lua")
+    add_defines('XPKG_TEST_PKGINDEX="$(projectdir)/tests/fixtures/pkgindex"')
     set_policy("build.c++.modules", true)

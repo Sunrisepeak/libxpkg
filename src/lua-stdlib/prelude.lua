@@ -35,16 +35,16 @@ os.host = function()
 end
 os.trymv = function(src, dst)
     local ok = pcall(os.rename, src, dst)
-    if not ok then
-        local inf = io.open(src, "rb")
-        if not inf then return false end
-        local content = inf:read("*a"); inf:close()
-        local outf = io.open(dst, "wb")
-        if not outf then return false end
-        outf:write(content); outf:close()
-        os.remove(src)
-    end
-    return true
+    if ok then return true end
+    -- Cross-device: fallback to copy + remove
+    local inf = io.open(src, "rb")
+    if not inf then return false end
+    local content = inf:read("*a"); inf:close()
+    local outf = io.open(dst, "wb")
+    if not outf then return false end
+    outf:write(content); outf:close()
+    local rm_ok = pcall(os.remove, src)
+    return rm_ok  -- only report success if source was removed
 end
 os.mv = function(src, dst) return os.trymv(src, dst) end
 os.cp = function(src, dst)
@@ -58,10 +58,21 @@ os.cp = function(src, dst)
 end
 os.dirs = function(pattern)
     local result = {}
-    local f = io.popen('ls -d ' .. pattern .. ' 2>/dev/null')
+    -- Quote pattern to handle spaces; use platform-appropriate command
+    local sep = package.config:sub(1,1)
+    local cmd
+    if sep == "\\" then
+        cmd = 'dir /B /AD "' .. pattern .. '" 2>nul'
+    else
+        cmd = 'ls -d "' .. pattern .. '" 2>/dev/null'
+    end
+    local f = io.popen(cmd)
     if f then
         for line in f:lines() do
-            if os.isdir(line) then table.insert(result, line) end
+            line = line:gsub("[\r\n]+$", "")  -- strip CRLF
+            if line ~= "" and os.isdir(line) then
+                table.insert(result, line)
+            end
         end
         f:close()
     end
@@ -139,12 +150,12 @@ end
 function try(block)
     local fn = block[1]
     local catch_block = block.catch
-    local ok, err = pcall(fn)
+    local ok, result = pcall(fn)
     if not ok then
         if catch_block and catch_block[1] then
-            catch_block[1](err)
+            catch_block[1](result)
         end
         return nil
     end
-    return err
+    return result
 end

@@ -1,10 +1,10 @@
 -- xim.libxpkg.pkginfo: package info API reading from _RUNTIME global
 local M = {}
 
-function M.name()         return _RUNTIME.pkg_name end
-function M.version()      return _RUNTIME.version end
-function M.install_file() return _RUNTIME.install_file end
-function M.deps_list()    return _RUNTIME.deps_list or {} end
+function M.name()         return _RUNTIME and _RUNTIME.pkg_name or nil end
+function M.version()      return _RUNTIME and _RUNTIME.version or nil end
+function M.install_file() return _RUNTIME and _RUNTIME.install_file or nil end
+function M.deps_list()    return (_RUNTIME and _RUNTIME.deps_list) or {} end
 
 local function _ends_with(s, suffix)
     return suffix == "" or s:sub(-#suffix) == suffix

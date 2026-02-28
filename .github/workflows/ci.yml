@@ -1,0 +1,96 @@
+name: CI
+
+on:
+  push:
+    branches: [main, master]
+  pull_request:
+    branches: [main, master]
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: ci-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  build-linux:
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Setup xmake
+        uses: xmake-io/github-action-setup-xmake@v1
+        with:
+          xmake-version: latest
+          package-cache: true
+
+      - name: Install dependencies
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y build-essential
+
+      - name: Install Xlings
+        env:
+          XLINGS_NON_INTERACTIVE: 1
+        run: |
+          curl -fsSL https://raw.githubusercontent.com/d2learn/xlings/refs/heads/main/tools/other/quick_install.sh | bash
+          echo "PATH=$HOME/.xlings/subos/current/bin:$PATH" >> "$GITHUB_ENV"
+
+      - name: Install GCC 15.1 with Xlings
+        run: |
+          xlings install gcc@15.1 -y
+
+      - name: Build
+        run: |
+          xmake f -m release -y -vv
+          xmake -y -vv -j$(nproc)
+
+      - name: Test
+        run: xmake run templates_test
+
+      - name: Run examples
+        run: xmake run basic
+
+  build-macos:
+    runs-on: macos-14
+    timeout-minutes: 20
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Install dependencies
+        run: brew install xmake llvm@20
+
+      - name: Build
+        run: |
+          export PATH=/opt/homebrew/opt/llvm@20/bin:$PATH
+          xmake f --toolchain=llvm --sdk=/opt/homebrew/opt/llvm@20 -m release -y -vv
+          xmake -y -vv -j$(sysctl -n hw.ncpu)
+
+  build-windows:
+    runs-on: windows-latest
+    timeout-minutes: 20
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Setup xmake
+        uses: xmake-io/github-action-setup-xmake@v1
+        with:
+          xmake-version: latest
+          package-cache: true
+
+      - name: Build
+        run: |
+          xmake f -m release -y -vv
+          xmake -y -vv -j$env:NUMBER_OF_PROCESSORS
+
+      - name: Test
+        run: xmake run templates_test
+
+      - name: Run examples
+        run: xmake run basic

@@ -1,0 +1,9 @@
+xname = "mcpplibs-templates"
+
+-- install by `xlings install`
+xim = {
+    xmake = "3.0.4",
+    cmake = "4.0.2",
+    ninja = "1.12.1",
+    cpp = "", -- gcc15 or mingw13
+}

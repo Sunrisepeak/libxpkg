@@ -1,0 +1,152 @@
+name: Release
+
+on:
+  workflow_dispatch:
+    inputs:
+      version:
+        description: "Release version (e.g., 0.1.1)"
+        required: true
+        type: string
+
+jobs:
+  build-linux:
+    runs-on: ubuntu-latest
+    timeout-minutes: 25
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Setup xmake
+        uses: xmake-io/github-action-setup-xmake@v1
+        with:
+          xmake-version: latest
+
+      - name: Install dependencies
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y build-essential
+
+      - name: Install Xlings
+        run: curl -fsSL https://d2learn.org/xlings-install.sh | bash
+
+      - name: Install GCC 15.1 with Xlings
+        run: |
+          export PATH=/home/xlings/.xlings_data/bin:$PATH
+          xlings install gcc@15.1 -y
+
+      - name: Build with xmake
+        run: |
+          export PATH=/home/xlings/.xlings_data/bin:$PATH
+          xmake f -m release -y -vv
+          xmake -y -vv -j$(nproc)
+
+      - name: Run tests
+        run: |
+          export PATH=/home/xlings/.xlings_data/bin:$PATH
+          xmake run templates_test
+
+      - name: Create release package
+        run: |
+          PKG="mcpplibs-templates-${{ inputs.version }}-linux-x86_64"
+          mkdir -p "$PKG"
+          cp build/linux/x86_64/release/libmcpplibs-templates.a "$PKG/"
+          cp src/templates.cppm README.md LICENSE "$PKG/"
+          tar -czf "${PKG}.tar.gz" "$PKG"
+
+      - name: Upload artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: templates-linux-x86_64
+          path: mcpplibs-templates-${{ inputs.version }}-linux-x86_64.tar.gz
+
+  build-macos:
+    runs-on: macos-14
+    timeout-minutes: 25
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Install dependencies
+        run: brew install xmake llvm@20
+
+      - name: Build with xmake (LLVM 20)
+        run: |
+          export PATH=/opt/homebrew/opt/llvm@20/bin:$PATH
+          xmake f -p macosx -m release --toolchain=llvm --sdk=/opt/homebrew/opt/llvm@20 -y -vv
+          xmake -y -vv -j$(sysctl -n hw.ncpu)
+
+      - name: Create release package
+        run: |
+          PKG="mcpplibs-templates-${{ inputs.version }}-macosx-arm64"
+          mkdir -p "$PKG"
+          cp build/macosx/arm64/release/libmcpplibs-templates.a "$PKG/"
+          cp src/templates.cppm README.md LICENSE "$PKG/"
+          tar -czf "${PKG}.tar.gz" "$PKG"
+
+      - name: Upload artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: templates-macosx-arm64
+          path: mcpplibs-templates-${{ inputs.version }}-macosx-arm64.tar.gz
+
+  build-windows:
+    runs-on: windows-latest
+    timeout-minutes: 25
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Setup xmake
+        uses: xmake-io/github-action-setup-xmake@v1
+        with:
+          xmake-version: latest
+
+      - name: Build with xmake
+        run: |
+          xmake f -m release -y -vv
+          xmake -y -vv -j$env:NUMBER_OF_PROCESSORS
+
+      - name: Run tests
+        run: xmake run templates_test
+
+      - name: Create release package
+        shell: pwsh
+        run: |
+          $pkg = "mcpplibs-templates-${{ inputs.version }}-windows-x86_64"
+          New-Item -ItemType Directory -Path $pkg -Force | Out-Null
+          Copy-Item "build\windows\x64\release\mcpplibs-templates.lib" -Destination "$pkg\"
+          Copy-Item "src\templates.cppm" -Destination "$pkg\"
+          Copy-Item "README.md" -Destination "$pkg\"
+          Copy-Item "LICENSE" -Destination "$pkg\"
+          Compress-Archive -Path $pkg -DestinationPath "$pkg.zip"
+
+      - name: Upload artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: templates-windows-x86_64
+          path: mcpplibs-templates-${{ inputs.version }}-windows-x86_64.zip
+
+  create-release:
+    needs: [build-linux, build-macos, build-windows]
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+    steps:
+      - name: Download all artifacts
+        uses: actions/download-artifact@v4
+        with:
+          path: artifacts
+
+      - name: Create Release
+        uses: softprops/action-gh-release@v1
+        with:
+          tag_name: v${{ inputs.version }}
+          name: ${{ inputs.version }}
+          draft: false
+          prerelease: false
+          files: |
+            artifacts/templates-linux-x86_64/mcpplibs-templates-${{ inputs.version }}-linux-x86_64.tar.gz
+            artifacts/templates-macosx-arm64/mcpplibs-templates-${{ inputs.version }}-macosx-arm64.tar.gz
+            artifacts/templates-windows-x86_64/mcpplibs-templates-${{ inputs.version }}-windows-x86_64.zip
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}

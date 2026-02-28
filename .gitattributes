@@ -1,0 +1,7 @@
+*.cppm linguist-language=cpp
+*.cppm linguist-detectable=true
+*.cppm linguist-documentation=false
+
+*.mpp linguist-language=cpp
+*.mpp linguist-detectable=true
+*.mpp linguist-documentation=false

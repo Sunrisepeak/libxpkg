@@ -1,4 +1,4 @@
-add_rules("mode.release", "mode.debug")
+add_rules("mode.debug", "mode.release")
 set_languages("c++23")
 
 add_requires("lua")

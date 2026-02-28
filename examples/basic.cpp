@@ -1,8 +1,10 @@
 import std;
-import mcpplibs.templates;
+import mcpplibs.xpkg;
 
 int main() {
-    std::println("=== mcpplibs.templates basic example ===");
-    mcpplibs::templates::hello_mcpp();
+    std::println("=== mcpplibs.xpkg basic example ===");
+    mcpplibs::xpkg::Package p;
+    p.name = "example";
+    std::println("Package name: {}", p.name);
     return 0;
 }

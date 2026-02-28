@@ -1,9 +1,33 @@
 add_requires("gtest")
 
-target("xpkg_test")
+-- Data model tests — only mcpplibs.xpkg, no external deps
+target("xpkg_model_test")
     set_kind("binary")
-    add_files("*.cpp")
-    add_deps("mcpplibs-xpkg", "mcpplibs-xpkg-loader",
-             "mcpplibs-xpkg-index", "mcpplibs-xpkg-executor")
+    add_files("main.cpp", "test_model.cpp")
+    add_deps("mcpplibs-xpkg")
+    add_packages("gtest")
+    set_policy("build.c++.modules", true)
+
+-- Loader tests — mcpplibs.xpkg + mcpplibs.xpkg.loader (needs lua)
+target("xpkg_loader_test")
+    set_kind("binary")
+    add_files("main.cpp", "test_loader.cppm")
+    add_deps("mcpplibs-xpkg", "mcpplibs-xpkg-loader")
+    add_packages("gtest", "mcpplibs-capi-lua")
+    set_policy("build.c++.modules", true)
+
+-- Index tests — mcpplibs.xpkg + mcpplibs.xpkg.index, pure C++
+target("xpkg_index_test")
+    set_kind("binary")
+    add_files("main.cpp", "test_index.cpp")
+    add_deps("mcpplibs-xpkg", "mcpplibs-xpkg-index")
+    add_packages("gtest")
+    set_policy("build.c++.modules", true)
+
+-- Executor tests — mcpplibs.xpkg + mcpplibs.xpkg.executor (needs lua)
+target("xpkg_executor_test")
+    set_kind("binary")
+    add_files("main.cpp", "test_executor.cpp")
+    add_deps("mcpplibs-xpkg", "mcpplibs-xpkg-executor")
     add_packages("gtest", "mcpplibs-capi-lua")
     set_policy("build.c++.modules", true)

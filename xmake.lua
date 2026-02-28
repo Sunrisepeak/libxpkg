@@ -32,6 +32,9 @@ target("mcpplibs-xpkg-executor")
     add_packages("lua", {public = true})
     add_files("src/xpkg-executor.cppm", {public = true, install = true})
     set_policy("build.c++.modules", true)
+    before_build(function(target)
+        os.exec("bash scripts/gen_lua_embed.sh")
+    end)
 
 if not is_host("macosx") then
     includes("examples", "tests")

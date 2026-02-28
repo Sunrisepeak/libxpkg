@@ -5,5 +5,5 @@ target("xpkg_test")
     add_files("*.cpp")
     add_deps("mcpplibs-xpkg", "mcpplibs-xpkg-loader",
              "mcpplibs-xpkg-index", "mcpplibs-xpkg-executor")
-    add_packages("gtest")
+    add_packages("gtest", "mcpplibs-capi-lua")
     set_policy("build.c++.modules", true)

@@ -1,9 +1,8 @@
 module;
 
-#include "lua_stdlib_embed.hpp"
-
 export module mcpplibs.xpkg.executor;
 import mcpplibs.xpkg;
+import mcpplibs.xpkg.lua_stdlib;
 import mcpplibs.capi.lua;
 import std;
 

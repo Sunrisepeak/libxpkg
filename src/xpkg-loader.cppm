@@ -10,15 +10,71 @@ namespace fs  = std::filesystem;
 
 namespace mcpplibs::xpkg::loader_detail {
 
-// Register a no-op import() function so package .lua files can be loaded
-// without xmake's module system
-void register_noop_import(lua::State* L) {
+// Register loader sandbox: no-op import() + defensive stubs for non-standard
+// globals. This gives the loader a self-contained pure Lua 5.4 environment
+// that does not depend on any xmake runtime. Stubs ensure legacy or
+// third-party packages can still be loaded without crashing.
+void register_loader_sandbox(lua::State* L) {
     lua::L_dostring(L,
+        // no-op import
         "import = function(...) "
         "  return setmetatable({}, { "
         "    __index = function() return function() end end "
         "  }) "
-        "end");
+        "end\n"
+
+        // non-standard global stubs
+        "function is_host() return false end\n"
+        "format = string.format\n"
+
+        // os extensions (safe defaults)
+        "os.host      = os.host or function() return 'unknown' end\n"
+        "os.isfile    = os.isfile or function() return false end\n"
+        "os.isdir     = os.isdir or function() return false end\n"
+        "os.scriptdir = os.scriptdir or function() return '.' end\n"
+        "os.dirs      = os.dirs or function() return {} end\n"
+        "os.files     = os.files or function() return {} end\n"
+        "os.exists    = os.exists or function() return false end\n"
+        "os.tryrm     = os.tryrm or function() end\n"
+        "os.trymv     = os.trymv or function() end\n"
+        "os.iorun     = os.iorun or function() return nil end\n"
+        "os.cd        = os.cd or function() end\n"
+        "os.mkdir     = os.mkdir or function() end\n"
+        "os.sleep     = os.sleep or function() end\n"
+
+        // path module stub
+        "path = path or {}\n"
+        "path.join      = path.join or function(...) return table.concat({...}, '/') end\n"
+        "path.filename  = path.filename or function(p) return p:match('[^/\\\\]+$') or p end\n"
+        "path.directory = path.directory or function(p) return p:match('(.*)[/\\\\]') or '.' end\n"
+        "path.basename  = path.basename or function(p) return p:match('[^/\\\\]+$') or p end\n"
+
+        // io extensions
+        "io.readfile  = io.readfile or function() return '' end\n"
+        "io.writefile = io.writefile or function() end\n"
+
+        // try/catch stub
+        "try = try or function(block) pcall(block[1]) end\n"
+
+        // cprint stub
+        "cprint = cprint or print\n"
+
+        // string extensions
+        "string.replace = string.replace or function(s, old, new) return s:gsub(old, new) end\n"
+        "string.split   = string.split or function(s, sep) "
+        "  local r = {} "
+        "  for m in (s .. sep):gmatch('(.-)' .. sep) do r[#r+1] = m end "
+        "  return r "
+        "end\n"
+
+        // raise stub
+        "raise = raise or function() end\n"
+
+        // noop module-level stubs
+        "runtime = setmetatable({}, { __index = function() return function() end end })\n"
+        "system  = setmetatable({}, { __index = function() return function() end end })\n"
+        "libxpkg = setmetatable({}, { __index = function() return setmetatable({}, { __index = function() return function() end end }) end })\n"
+    );
 }
 
 std::string get_str(lua::State* L, int idx, const char* key) {
@@ -128,8 +184,8 @@ load_package(const fs::path& pkg_path) {
     if (!L) return std::unexpected("failed to create lua state");
     lua::L_openlibs(L);
 
-    // Register no-op import() so package scripts don't fail on import calls
-    loader_detail::register_noop_import(L);
+    // Register loader sandbox (pure Lua 5.4, no xmake dependency)
+    loader_detail::register_loader_sandbox(L);
 
     if (lua::L_dofile(L, pkg_path.string().c_str()) != lua::OK) {
         std::string err = lua::tostring(L, -1);

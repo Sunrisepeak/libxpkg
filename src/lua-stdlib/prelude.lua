@@ -4,6 +4,9 @@
 -- _LIBXPKG_MODULES is populated by C++ before this file runs
 _LIBXPKG_MODULES = _LIBXPKG_MODULES or {}
 
+-- Save Lua's built-in package.config before xpkg scripts overwrite `package` global
+local _PATH_SEP = package.config:sub(1,1)
+
 -- import(): maps "xim.libxpkg.X" to preloaded modules
 -- Also registers module as global variable (xmake compat: bare import() sets global)
 function import(mod_path)
@@ -27,7 +30,7 @@ os.isfile = function(p)
     return false
 end
 os.isdir = function(p)
-    local sep = package.config:sub(1,1)
+    local sep = _PATH_SEP
     if sep == "\\" then
         return os.execute('if exist "' .. p .. '\\" exit 0') == 0
     else
@@ -63,7 +66,7 @@ end
 os.dirs = function(pattern)
     local result = {}
     -- Quote pattern to handle spaces; use platform-appropriate command
-    local sep = package.config:sub(1,1)
+    local sep = _PATH_SEP
     local cmd
     if sep == "\\" then
         cmd = 'dir /B /AD "' .. pattern .. '" 2>nul'
@@ -85,7 +88,7 @@ end
 os.sleep = function(ms) end  -- stub
 os.tryrm = function(p)
     if not p then return false end
-    local sep = package.config:sub(1,1)
+    local sep = _PATH_SEP
     local cmd
     if sep == "\\" then
         cmd = 'rmdir /s /q "' .. p .. '" 2>nul'
@@ -97,7 +100,7 @@ os.tryrm = function(p)
 end
 os.mkdir = function(p)
     if not p then return false end
-    local sep = package.config:sub(1,1)
+    local sep = _PATH_SEP
     local cmd
     if sep == "\\" then
         cmd = 'mkdir "' .. p .. '" 2>nul'

@@ -95,6 +95,29 @@ graph TD
 - `PackageExecutor::check_installed(ctx)` — 检查安装状态
 - 支持钩子：`installed` / `build` / `install` / `config` / `uninstall`
 
+#### Lua 运行时兼容层
+
+executor 通过 `prelude.lua`（编译时嵌入 `xpkg-lua-stdlib.cppm`）为包脚本提供 xmake 兼容的运行环境。xpkg V1 规范的包脚本沿用了 xmake 的编程约定，因此 executor 需要兼容这些约定：
+
+| 类别 | 兼容项 | 说明 |
+|------|--------|------|
+| 模块系统 | `import()` 自动注册全局变量 | `import("xim.libxpkg.pkginfo")` 后可直接用 `pkginfo.xxx()` |
+| 内置模块 | `pkginfo`, `xvm`, `log`, `system`, `utils` | 读取 `_RUNTIME` 上下文，通过 `_LIBXPKG_MODULES` 注册 |
+| 全局函数 | `is_host()`, `format`, `raise`, `cprint`, `try` | xmake 内建函数的兼容实现 |
+| OS 扩展 | `os.tryrm`, `os.mkdir`, `os.mv`, `os.cp`, `os.dirs`, `os.host` | 跨平台文件操作 |
+| 字符串扩展 | `string.replace`, `string.split` | xmake 字符串方法兼容 |
+| 路径模块 | `path.join`, `path.filename`, `path.directory` | 跨平台路径操作 |
+
+**Loader vs Executor 的区别：**
+
+- **Loader**（`xpkg-loader.cppm`）：仅解析包元数据，所有函数为安全的 stub（如 `is_host()` 返回 `false`）
+- **Executor**（`xpkg-executor.cppm` + `prelude.lua`）：运行实际钩子，提供功能完整的实现（如 `is_host()` 读取 `_RUNTIME.platform`）
+
+> **后期优化方向：** 当前兼容层是对 xmake 运行时的逐项适配。后续应从 xpkg 规范层面明确定义包脚本运行时 API（而非隐式依赖 xmake 约定），在 libxpkg 中实现规范定义的标准运行时，减少对 xmake 兼容层的依赖。具体包括：
+> 1. 在 xpkg 规范中显式声明包脚本可用的全局函数、模块和 OS API
+> 2. libxpkg executor 按规范提供标准运行时，替代当前的 xmake 兼容 shim
+> 3. 提供规范合规性检查工具，帮助包作者验证脚本是否仅使用规范 API
+
 ## 目录结构
 
 ```

@@ -233,4 +233,26 @@ function M.encode(val, opts)
     return encode_value(val, indent, 0)
 end
 
+-- File convenience functions (xmake compat: json.loadfile / json.savefile)
+function M.loadfile(filepath)
+    local f = io.open(filepath, "r")
+    if not f then return nil end
+    local content = f:read("*a")
+    f:close()
+    if not content or content == "" then return nil end
+    local ok, val = pcall(M.decode, content)
+    if not ok then return nil end
+    return val
+end
+
+function M.savefile(filepath, val, opts)
+    local content = M.encode(val, opts)
+    local f = io.open(filepath, "w")
+    if not f then return false end
+    f:write(content)
+    f:write("\n")
+    f:close()
+    return true
+end
+
 return M

@@ -78,6 +78,7 @@ bool load_stdlib(lua::State* L, std::string& err_out) {
         { "pkgmanager", detail::pkgmanager_lua },
         { "elfpatch",   detail::elfpatch_lua   },
         { "json",       detail::json_lua       },
+        { "base64",     detail::base64_lua     },
     };
 
     for (auto& m : mods) {

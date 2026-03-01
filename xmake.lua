@@ -57,6 +57,7 @@ target("mcpplibs-xpkg-lua-stdlib")
         embed("pkgmanager_lua", "src/lua-stdlib/xim/libxpkg/pkgmanager.lua")
         embed("elfpatch_lua",   "src/lua-stdlib/xim/libxpkg/elfpatch.lua")
         embed("json_lua",       "src/lua-stdlib/xim/libxpkg/json.lua")
+        embed("base64_lua",     "src/lua-stdlib/xim/libxpkg/base64.lua")
 
         f:write("} // namespace mcpplibs::xpkg::detail\n")
         f:close()

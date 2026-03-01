@@ -2,7 +2,7 @@ add_rules("mode.debug", "mode.release")
 set_languages("c++23")
 
 add_repositories("mcpplibs-index https://github.com/mcpplibs/mcpplibs-index.git")
-add_requires("mcpplibs-capi-lua 0.0.1")
+add_requires("mcpplibs-capi-lua 0.0.2")
 
 -- Data model (zero external deps)
 target("mcpplibs-xpkg")

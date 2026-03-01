@@ -5,15 +5,19 @@
 _LIBXPKG_MODULES = _LIBXPKG_MODULES or {}
 
 -- import(): maps "xim.libxpkg.X" to preloaded modules
+-- Also registers module as global variable (xmake compat: bare import() sets global)
 function import(mod_path)
     local name = mod_path:match("xim%.libxpkg%.(.+)")
     if name and _LIBXPKG_MODULES[name] then
+        _G[name] = _LIBXPKG_MODULES[name]
         return _LIBXPKG_MODULES[name]
     end
     -- Stub for unknown imports (base.runtime etc.)
-    return setmetatable({}, {
+    local stub = setmetatable({}, {
         __index = function(_, k) return function(...) end end
     })
+    if name then _G[name] = stub end
+    return stub
 end
 
 -- os.* extensions (xmake compat)
@@ -69,9 +73,9 @@ os.dirs = function(pattern)
     local f = io.popen(cmd)
     if f then
         for line in f:lines() do
-            line = line:gsub("[\r\n]+$", "")  -- strip CRLF
-            if line ~= "" and os.isdir(line) then
-                table.insert(result, line)
+            local clean = line:gsub("[\r\n]+$", "")  -- strip CRLF
+            if clean ~= "" and os.isdir(clean) then
+                table.insert(result, clean)
             end
         end
         f:close()
@@ -79,6 +83,30 @@ os.dirs = function(pattern)
     return result
 end
 os.sleep = function(ms) end  -- stub
+os.tryrm = function(p)
+    if not p then return false end
+    local sep = package.config:sub(1,1)
+    local cmd
+    if sep == "\\" then
+        cmd = 'rmdir /s /q "' .. p .. '" 2>nul'
+    else
+        cmd = 'rm -rf "' .. p .. '" 2>/dev/null'
+    end
+    os.execute(cmd)
+    return true
+end
+os.mkdir = function(p)
+    if not p then return false end
+    local sep = package.config:sub(1,1)
+    local cmd
+    if sep == "\\" then
+        cmd = 'mkdir "' .. p .. '" 2>nul'
+    else
+        cmd = 'mkdir -p "' .. p .. '" 2>/dev/null'
+    end
+    os.execute(cmd)
+    return true
+end
 
 -- path module
 path = {}
@@ -141,6 +169,30 @@ if not string.split then
             end
             table.insert(result, s:sub(i, j-1))
             i = k + 1
+        end
+        return result
+    end
+end
+
+-- xmake compat globals
+function is_host(name)
+    local host = _RUNTIME and _RUNTIME.platform or os.host()
+    return host == name
+end
+format = string.format
+raise = function(msg) error(msg or "raise called", 2) end
+
+-- string.replace: xmake compat (plain text replacement)
+if not string.replace then
+    function string.replace(s, old, new)
+        -- Plain text replacement (not pattern)
+        local result = s
+        local i = 1
+        while true do
+            local pos = result:find(old, i, true)
+            if not pos then break end
+            result = result:sub(1, pos - 1) .. new .. result:sub(pos + #old)
+            i = pos + #new
         end
         return result
     end

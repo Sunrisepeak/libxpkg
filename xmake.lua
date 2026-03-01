@@ -68,6 +68,14 @@ target("mcpplibs-xpkg-executor")
     add_files("src/xpkg-executor.cppm", {public = true, install = true})
     set_policy("build.c++.modules", true)
 
+-- Aggregate target: add_deps("xpkg") to get all modules
+target("xpkg")
+    set_kind("phony")
+    add_deps("mcpplibs-xpkg", "mcpplibs-xpkg-loader",
+             "mcpplibs-xpkg-index", "mcpplibs-xpkg-lua-stdlib",
+             "mcpplibs-xpkg-executor")
+    add_packages("mcpplibs-capi-lua", {public = true})
+
 if not is_host("macosx") then
     includes("examples", "tests")
 end

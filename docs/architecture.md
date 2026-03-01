@@ -8,19 +8,24 @@
 
 ## 模块概览
 
-libxpkg 由四个按依赖分层的子模块组成：
+libxpkg 由四个按依赖分层的子模块组成，并提供聚合 target `xpkg` 一次引入全部模块：
 
 ```
-mcpplibs.xpkg              ← 纯 C++ 数据模型，零外部依赖
-mcpplibs.xpkg.loader       ← 依赖 model + lua 库；解析 .lua 文件
-mcpplibs.xpkg.index        ← 依赖 model；纯 C++ 索引操作
-mcpplibs.xpkg.executor     ← 依赖 model + lua 库；执行钩子
+xpkg (聚合 target)         ← add_deps("xpkg") 引入以下全部模块
+├── mcpplibs.xpkg          ← 纯 C++ 数据模型，零外部依赖
+├── mcpplibs.xpkg.loader   ← 依赖 model + lua 库；解析 .lua 文件
+├── mcpplibs.xpkg.index    ← 依赖 model；纯 C++ 索引操作
+└── mcpplibs.xpkg.executor ← 依赖 model + lua 库；执行钩子
 ```
 
 ### 依赖关系
 
 ```mermaid
 graph TD
+    subgraph aggregateLayer [聚合层]
+        X["xpkg<br/>(phony target)"]
+    end
+
     subgraph modelLayer [数据模型层]
         M["mcpplibs.xpkg<br/>src/xpkg.cppm"]
     end
@@ -35,6 +40,10 @@ graph TD
         LUA["mcpplibs.capi.lua<br/>(lua 绑定)"]
     end
 
+    X --> M
+    X --> L
+    X --> I
+    X --> E
     M --> L
     M --> I
     M --> E

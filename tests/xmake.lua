@@ -1,12 +1,45 @@
-add_rules("mode.debug", "mode.release")
-
-set_languages("c++23")
-
 add_requires("gtest")
 
-target("templates_test")
+-- Data model tests — only mcpplibs.xpkg, no external deps
+target("xpkg_model_test")
     set_kind("binary")
-    add_files("*.cpp")
-    add_deps("mcpplibs-templates")
+    add_files("main.cpp", "test_model.cpp")
+    add_deps("mcpplibs-xpkg")
     add_packages("gtest")
     set_policy("build.c++.modules", true)
+
+-- Loader tests — mcpplibs.xpkg + mcpplibs.xpkg.loader (needs lua)
+target("xpkg_loader_test")
+    set_kind("binary")
+    add_files("main.cpp", "test_loader.cppm")
+    add_deps("mcpplibs-xpkg", "mcpplibs-xpkg-loader")
+    add_packages("gtest", "mcpplibs-capi-lua")
+    set_policy("build.c++.modules", true)
+    on_config(function(target)
+        -- Normalize to forward slashes: Windows $(projectdir) contains backslashes
+        -- which are misinterpreted as C escape sequences in string literals.
+        local dir = path.join(os.projectdir(), "tests", "fixtures", "pkgindex")
+        dir = dir:gsub("\\", "/")
+        target:add("defines", 'XPKG_TEST_PKGINDEX="' .. dir .. '"')
+    end)
+
+-- Index tests — mcpplibs.xpkg + mcpplibs.xpkg.index, pure C++
+target("xpkg_index_test")
+    set_kind("binary")
+    add_files("main.cpp", "test_index.cpp")
+    add_deps("mcpplibs-xpkg", "mcpplibs-xpkg-index")
+    add_packages("gtest")
+    set_policy("build.c++.modules", true)
+
+-- Executor tests — mcpplibs.xpkg + mcpplibs.xpkg.executor (needs lua)
+target("xpkg_executor_test")
+    set_kind("binary")
+    add_files("main.cpp", "test_executor.cpp")
+    add_deps("mcpplibs-xpkg", "mcpplibs-xpkg-executor")
+    add_packages("gtest", "mcpplibs-capi-lua")
+    set_policy("build.c++.modules", true)
+    on_config(function(target)
+        local dir = path.join(os.projectdir(), "tests", "fixtures", "pkgindex")
+        dir = dir:gsub("\\", "/")
+        target:add("defines", 'XPKG_TEST_PKGINDEX="' .. dir .. '"')
+    end)

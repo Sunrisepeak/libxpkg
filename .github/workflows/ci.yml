@@ -50,7 +50,11 @@ jobs:
           xmake -y -vv -j$(nproc)
 
       - name: Test
-        run: xmake run templates_test
+        run: |
+          xmake run xpkg_model_test
+          xmake run xpkg_index_test
+          xmake run xpkg_loader_test
+          xmake run xpkg_executor_test
 
       - name: Run examples
         run: xmake run basic
@@ -90,7 +94,11 @@ jobs:
           xmake -y -vv -j$env:NUMBER_OF_PROCESSORS
 
       - name: Test
-        run: xmake run templates_test
+        run: |
+          xmake run xpkg_model_test
+          xmake run xpkg_index_test
+          xmake run xpkg_loader_test
+          xmake run xpkg_executor_test
 
       - name: Run examples
         run: xmake run basic

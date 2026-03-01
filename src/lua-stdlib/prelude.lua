@@ -16,6 +16,8 @@ function import(mod_path)
         return _LIBXPKG_MODULES[name]
     end
     -- Stub for unknown imports (base.runtime etc.)
+    io.write("[libxpkg] WARNING: unknown module '" .. mod_path .. "', returning stub\n")
+    io.flush()
     local stub = setmetatable({}, {
         __index = function(_, k) return function(...) end end
     })

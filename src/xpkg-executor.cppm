@@ -70,11 +70,14 @@ bool load_stdlib(lua::State* L, std::string& err_out) {
     // Each module script returns a table; store it into _LIBXPKG_MODULES[name]
     struct ModEntry { const char* name; std::string_view src; };
     const ModEntry mods[] = {
-        { "log",     detail::log_lua    },
-        { "pkginfo", detail::pkginfo_lua },
-        { "system",  detail::system_lua },
-        { "xvm",     detail::xvm_lua    },
-        { "utils",   detail::utils_lua  },
+        { "log",        detail::log_lua        },
+        { "pkginfo",    detail::pkginfo_lua    },
+        { "system",     detail::system_lua     },
+        { "xvm",        detail::xvm_lua        },
+        { "utils",      detail::utils_lua      },
+        { "pkgmanager", detail::pkgmanager_lua },
+        { "elfpatch",   detail::elfpatch_lua   },
+        { "json",       detail::json_lua       },
     };
 
     for (auto& m : mods) {

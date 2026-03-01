@@ -25,6 +25,18 @@ struct HookResult {
     std::string version;  // non-empty when installed() returns a version string
 };
 
+struct XvmOp {
+    std::string op;         // "add" | "remove" | "headers" | "remove_headers"
+    std::string name;
+    std::string version;
+    std::string bindir;
+    std::string alias;
+    std::string type;       // "program" | "lib"
+    std::string filename;
+    std::string binding;
+    std::string includedir; // for headers/remove_headers ops
+};
+
 enum class HookType { Installed, Build, Install, Config, Uninstall };
 
 } // export namespace mcpplibs::xpkg
@@ -214,6 +226,43 @@ public:
 
     HookResult check_installed(const ExecutionContext& ctx) {
         return run_hook(HookType::Installed, ctx);
+    }
+
+    std::vector<XvmOp> xvm_operations() {
+        std::vector<XvmOp> ops;
+        lua::getglobal(L_, "_XVM_OPS");
+        if (lua::type(L_, -1) != lua::TTABLE) {
+            lua::pop(L_, 1);
+            return ops;
+        }
+        int len = (int)lua::rawlen(L_, -1);
+        for (int i = 1; i <= len; ++i) {
+            lua::rawgeti(L_, -1, i);
+            if (lua::type(L_, -1) == lua::TTABLE) {
+                XvmOp op;
+                auto read_field = [&](const char* key) -> std::string {
+                    lua::getfield(L_, -1, key);
+                    std::string val;
+                    if (lua::type(L_, -1) == lua::TSTRING)
+                        val = lua::tostring(L_, -1);
+                    lua::pop(L_, 1);
+                    return val;
+                };
+                op.op         = read_field("op");
+                op.name       = read_field("name");
+                op.version    = read_field("version");
+                op.bindir     = read_field("bindir");
+                op.alias      = read_field("alias");
+                op.type       = read_field("type");
+                op.filename   = read_field("filename");
+                op.binding    = read_field("binding");
+                op.includedir = read_field("includedir");
+                ops.push_back(std::move(op));
+            }
+            lua::pop(L_, 1);
+        }
+        lua::pop(L_, 1);
+        return ops;
     }
 };
 

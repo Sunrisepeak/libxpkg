@@ -8,7 +8,7 @@
 
 ## 模块
 
-libxpkg 由四个独立的 C++23 子模块组成，按依赖层级排列：
+libxpkg 由四个独立的 C++23 子模块组成，按依赖层级排列。可通过聚合 target `xpkg` 一次引入全部模块（`add_deps("xpkg")`），也可按需引用单个子模块：
 
 | 模块 | 头文件 | 依赖 | 功能 |
 |------|--------|------|------|
@@ -137,6 +137,8 @@ GitHub Actions 在三个平台上自动构建和测试：
 
 ## xmake 集成
 
+**引入全部模块**（推荐）：
+
 ```lua
 add_repositories("mcpplibs-index https://github.com/mcpplibs/mcpplibs-index.git")
 add_requires("mcpplibs-xpkg")
@@ -145,7 +147,18 @@ target("myapp")
     set_kind("binary")
     set_languages("c++23")
     add_files("main.cpp")
-    add_deps("mcpplibs-xpkg", "mcpplibs-xpkg-loader")
+    add_deps("xpkg")  -- 聚合 target，包含所有子模块
+    set_policy("build.c++.modules", true)
+```
+
+**按需引入单个子模块**：
+
+```lua
+target("myapp")
+    set_kind("binary")
+    set_languages("c++23")
+    add_files("main.cpp")
+    add_deps("mcpplibs-xpkg", "mcpplibs-xpkg-loader")  -- 仅引入数据模型 + 加载器
     set_policy("build.c++.modules", true)
 ```
 

@@ -42,12 +42,19 @@ void register_loader_sandbox(lua::State* L) {
         "os.mkdir     = os.mkdir or function() end\n"
         "os.sleep     = os.sleep or function() end\n"
 
-        // path module stub
+        // path module stub (robust to nil args from other stubs)
         "path = path or {}\n"
-        "path.join      = path.join or function(...) return table.concat({...}, '/') end\n"
-        "path.filename  = path.filename or function(p) return p:match('[^/\\\\]+$') or p end\n"
-        "path.directory = path.directory or function(p) return p:match('(.*)[/\\\\]') or '.' end\n"
-        "path.basename  = path.basename or function(p) return p:match('[^/\\\\]+$') or p end\n"
+        "path.join      = path.join or function(...) "
+        "  local parts = {} "
+        "  for i = 1, select('#', ...) do "
+        "    local v = select(i, ...) "
+        "    if v ~= nil then parts[#parts+1] = tostring(v) end "
+        "  end "
+        "  return table.concat(parts, '/') "
+        "end\n"
+        "path.filename  = path.filename or function(p) return type(p)=='string' and (p:match('[^/\\\\]+$') or p) or '' end\n"
+        "path.directory = path.directory or function(p) return type(p)=='string' and (p:match('(.*)[/\\\\]') or '.') or '.' end\n"
+        "path.basename  = path.basename or function(p) return type(p)=='string' and (p:match('[^/\\\\]+$') or p) or '' end\n"
 
         // io extensions
         "io.readfile  = io.readfile or function() return '' end\n"
@@ -70,10 +77,10 @@ void register_loader_sandbox(lua::State* L) {
         // raise stub
         "raise = raise or function() end\n"
 
-        // noop module-level stubs
-        "runtime = setmetatable({}, { __index = function() return function() end end })\n"
-        "system  = setmetatable({}, { __index = function() return function() end end })\n"
-        "libxpkg = setmetatable({}, { __index = function() return setmetatable({}, { __index = function() return function() end end }) end })\n"
+        // noop module-level stubs (return '' so path.join etc. get strings, not nil)
+        "runtime = setmetatable({}, { __index = function() return function() return '' end end })\n"
+        "system  = setmetatable({}, { __index = function() return function() return '' end end })\n"
+        "libxpkg = setmetatable({}, { __index = function() return setmetatable({}, { __index = function() return function() return '' end end }) end })\n"
     );
 }
 

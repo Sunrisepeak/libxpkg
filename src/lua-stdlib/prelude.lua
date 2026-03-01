@@ -73,9 +73,9 @@ os.dirs = function(pattern)
     local f = io.popen(cmd)
     if f then
         for line in f:lines() do
-            line = line:gsub("[\r\n]+$", "")  -- strip CRLF
-            if line ~= "" and os.isdir(line) then
-                table.insert(result, line)
+            local clean = line:gsub("[\r\n]+$", "")  -- strip CRLF
+            if clean ~= "" and os.isdir(clean) then
+                table.insert(result, clean)
             end
         end
         f:close()

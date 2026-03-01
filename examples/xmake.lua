@@ -7,3 +7,13 @@ target("basic")
     add_files("basic.cpp")
     add_deps("mcpplibs-xpkg")
     set_policy("build.c++.modules", true)
+
+-- Full lifecycle demo: load → index → search → executor → install → uninstall
+target("lifecycle")
+    set_kind("binary")
+    add_files("lifecycle.cpp")
+    add_deps("mcpplibs-xpkg", "mcpplibs-xpkg-loader",
+             "mcpplibs-xpkg-index", "mcpplibs-xpkg-executor")
+    add_packages("mcpplibs-capi-lua")
+    add_defines('XPKG_FIXTURES_DIR="$(projectdir)/tests/fixtures"')
+    set_policy("build.c++.modules", true)

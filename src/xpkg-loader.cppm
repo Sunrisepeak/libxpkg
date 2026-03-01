@@ -141,6 +141,30 @@ PlatformMatrix parse_xpm(lua::State* L, int pkg_idx) {
 
         if (!platform.empty() && lua::type(L, -1) == lua::TTABLE) {
             int plat_idx = lua::gettop(L);
+
+            // Parse deps array if present
+            lua::getfield(L, plat_idx, "deps");
+            if (lua::type(L, -1) == lua::TTABLE) {
+                int deps_idx = lua::gettop(L);
+                int len = static_cast<int>(lua::rawlen(L, deps_idx));
+                for (int i = 1; i <= len; ++i) {
+                    lua::rawgeti(L, deps_idx, i);
+                    if (lua::type(L, -1) == lua::TSTRING) {
+                        xpm.deps[platform].push_back(lua::tostring(L, -1));
+                    }
+                    lua::pop(L, 1);
+                }
+            }
+            lua::pop(L, 1);  // pop deps field
+
+            // Parse inherits if present
+            lua::getfield(L, plat_idx, "inherits");
+            if (lua::type(L, -1) == lua::TSTRING) {
+                xpm.inherits[platform] = lua::tostring(L, -1);
+            }
+            lua::pop(L, 1);  // pop inherits field
+
+            // Iterate version entries
             lua::pushnil(L);
             while (lua::next(L, plat_idx)) {
                 // key = version string (at -2), value = resource (at -1)
@@ -148,7 +172,8 @@ PlatformMatrix parse_xpm(lua::State* L, int pkg_idx) {
                 if (lua::type(L, -2) == lua::TSTRING)
                     version = lua::tostring(L, -2);
 
-                if (!version.empty()) {
+                // Skip non-version keys (deps, inherits, etc.)
+                if (!version.empty() && version != "deps" && version != "inherits") {
                     PlatformResource res;
                     if (lua::type(L, -1) == lua::TTABLE) {
                         int res_idx = lua::gettop(L);

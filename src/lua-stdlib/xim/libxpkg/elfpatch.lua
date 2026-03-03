@@ -20,9 +20,12 @@ local function _tool_exists(name)
 end
 
 local function _is_elf(filepath)
-    if not _tool_exists("readelf") then return true end
-    local ret = os.execute('readelf -h "' .. filepath .. '" >/dev/null 2>&1')
-    return ret == 0 or ret == true
+    -- Check ELF magic bytes directly (faster and more reliable than readelf)
+    local f = io.open(filepath, "rb")
+    if not f then return false end
+    local magic = f:read(4)
+    f:close()
+    return magic == "\x7fELF"
 end
 
 local function _normalize_rpath(rpath)

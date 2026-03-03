@@ -232,6 +232,35 @@ public:
         return run_hook(HookType::Installed, ctx);
     }
 
+    // Run elfpatch.apply_auto() if the install hook set elfpatch_auto flag.
+    // Returns {scanned, patched, failed} counts. Safe to call unconditionally.
+    HookResult apply_elfpatch_auto() {
+        constexpr const char* script = R"__LUA__(
+            local ep = _LIBXPKG_MODULES and _LIBXPKG_MODULES["elfpatch"]
+            if not ep then return "no-ep 0 0 0" end
+            local r = ep.apply_auto()
+            return tostring(r.scanned) .. " " .. tostring(r.patched) .. " " .. tostring(r.failed)
+        )__LUA__";
+        HookResult result;
+        if (lua::L_loadstring(L_, script) != lua::OK) {
+            result.success = false;
+            result.error = lua::tostring(L_, -1);
+            lua::pop(L_, 1);
+            return result;
+        }
+        if (lua::pcall(L_, 0, 1, 0) == lua::OK) {
+            result.success = true;
+            if (lua::type(L_, -1) == lua::TSTRING)
+                result.output = lua::tostring(L_, -1);
+            lua::pop(L_, 1);
+        } else {
+            result.success = false;
+            result.error = lua::tostring(L_, -1);
+            lua::pop(L_, 1);
+        }
+        return result;
+    }
+
     std::vector<XvmOp> xvm_operations() {
         std::vector<XvmOp> ops;
         lua::getglobal(L_, "_XVM_OPS");

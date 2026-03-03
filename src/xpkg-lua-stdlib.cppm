@@ -35,16 +35,26 @@ end
 
 -- os.* extensions (xmake compat)
 os.isfile = function(p)
+    -- io.open succeeds on directories on Linux (fopen quirk), so also check it's not a dir
     local f = io.open(p, "r")
-    if f then f:close() return true end
-    return false
+    if not f then return false end
+    f:close()
+    -- Reject directories: try reading 0 bytes; directories fail with "Is a directory"
+    local f2 = io.open(p, "rb")
+    if not f2 then return false end
+    local ok, _ = f2:read(0)
+    f2:close()
+    -- read(0) returns "" on regular files, nil on directories
+    return ok ~= nil
 end
 os.isdir = function(p)
     local sep = _PATH_SEP
     if sep == "\\" then
-        return os.execute('if exist "' .. p .. '\\" exit 0') == 0
+        local ret = os.execute('if exist "' .. p .. '\\" exit 0')
+        return ret == 0 or ret == true
     else
-        return os.execute('[ -d "' .. p .. '" ]') == 0
+        local ret = os.execute('[ -d "' .. p .. '" ]')
+        return ret == 0 or ret == true
     end
 end
 os.host = function()
@@ -53,7 +63,10 @@ end
 os.trymv = function(src, dst)
     local ok = pcall(os.rename, src, dst)
     if ok then return true end
-    -- Cross-device: fallback to copy + remove
+    -- Cross-device or directory: fallback to shell mv
+    local ret = os.execute('mv "' .. src .. '" "' .. dst .. '" 2>/dev/null')
+    if ret == 0 or ret == true then return true end
+    -- Last resort: file copy + remove (files only)
     local inf = io.open(src, "rb")
     if not inf then return false end
     local content = inf:read("*a"); inf:close()
@@ -61,10 +74,17 @@ os.trymv = function(src, dst)
     if not outf then return false end
     outf:write(content); outf:close()
     local rm_ok = pcall(os.remove, src)
-    return rm_ok  -- only report success if source was removed
+    return rm_ok
 end
 os.mv = function(src, dst) return os.trymv(src, dst) end
 os.cp = function(src, dst)
+    -- Try shell cp first (handles directories, symlinks, etc.)
+    local sep = _PATH_SEP
+    if sep ~= "\\" then
+        local ret = os.execute('cp -a "' .. src .. '" "' .. dst .. '" 2>/dev/null')
+        if ret == 0 or ret == true then return true end
+    end
+    -- Fallback: file copy
     local inf = io.open(src, "rb")
     if not inf then return false end
     local content = inf:read("*a"); inf:close()
@@ -96,6 +116,27 @@ os.dirs = function(pattern)
     return result
 end
 os.sleep = function(ms) end  -- stub
+os.cd = function(dir)
+    if not dir then return false end
+    -- Lua has no built-in chdir; use lfs if available, else shell fallback
+    local ok, lfs = pcall(require, "lfs")
+    if ok and lfs and lfs.chdir then
+        return lfs.chdir(dir)
+    end
+    -- Fallback: not truly possible from pure Lua, but we set _CD for scripts
+    _CURRENT_DIR = dir
+    return true
+end
+os.iorun = function(cmd)
+    local f = io.popen(cmd .. " 2>/dev/null")
+    if not f then return "" end
+    local output = f:read("*a")
+    f:close()
+    return output or ""
+end
+os.exec = function(cmd)
+    return os.execute(cmd)
+end
 os.tryrm = function(p)
     if not p then return false end
     local sep = _PATH_SEP
@@ -184,6 +225,13 @@ if not string.split then
             i = k + 1
         end
         return result
+    end
+end
+
+-- string:trim(): remove leading/trailing whitespace
+if not string.trim then
+    function string.trim(s)
+        return s:match("^%s*(.-)%s*$") or s
     end
 end
 
@@ -597,9 +645,12 @@ local function _tool_exists(name)
 end
 
 local function _is_elf(filepath)
-    if not _tool_exists("readelf") then return true end
-    local ret = os.execute('readelf -h "' .. filepath .. '" >/dev/null 2>&1')
-    return ret == 0 or ret == true
+    -- Check ELF magic bytes directly (faster and more reliable than readelf)
+    local f = io.open(filepath, "rb")
+    if not f then return false end
+    local magic = f:read(4)
+    f:close()
+    return magic == "\x7fELF"
 end
 
 local function _normalize_rpath(rpath)

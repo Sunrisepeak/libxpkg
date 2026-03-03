@@ -53,6 +53,11 @@ os.host = function()
     return _RUNTIME and _RUNTIME.platform or "linux"
 end
 os.trymv = function(src, dst)
+    -- If dst is an existing directory, move src INTO it (unix mv semantics)
+    if os.isdir(dst) then
+        local fname = src:match("[^/\\]+$") or src
+        dst = dst:gsub("[/\\]+$", "") .. "/" .. fname
+    end
     local ok = pcall(os.rename, src, dst)
     if ok then return true end
     -- Cross-device or directory: fallback to shell mv

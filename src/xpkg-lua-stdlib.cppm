@@ -82,7 +82,8 @@ os.trymv = function(src, dst)
     return rm_ok
 end
 os.mv = function(src, dst) return os.trymv(src, dst) end
-os.cp = function(src, dst)
+os.cp = function(src, dst, opts)
+    -- opts accepted for xmake compat but ignored (cp -a already preserves symlinks)
     -- Try shell cp first (handles directories, symlinks, etc.)
     local sep = _PATH_SEP
     if sep ~= "\\" then
@@ -139,7 +140,32 @@ os.iorun = function(cmd)
     f:close()
     return output or ""
 end
+os.setenv = function(k, v)
+    if _PATH_SEP == "\\" then
+        os.execute(string.format('setx %s "%s"', k, v))
+    else
+        _ENV_OVERRIDES = _ENV_OVERRIDES or {}
+        _ENV_OVERRIDES[k] = v
+    end
+end
+os.addenv = function(k, v)
+    if _PATH_SEP == "\\" then
+        local cur = os.getenv(k) or ""
+        os.execute(string.format('setx %s "%s"', k, cur ~= "" and (cur .. ";" .. v) or v))
+    else
+        _ENV_OVERRIDES = _ENV_OVERRIDES or {}
+        local cur = _ENV_OVERRIDES[k] or os.getenv(k) or ""
+        _ENV_OVERRIDES[k] = cur ~= "" and (cur .. ":" .. v) or v
+    end
+end
 os.exec = function(cmd)
+    if _ENV_OVERRIDES and _PATH_SEP ~= "\\" then
+        local prefix = ""
+        for k, v in pairs(_ENV_OVERRIDES) do
+            prefix = prefix .. string.format('%s="%s" ', k, v)
+        end
+        if prefix ~= "" then cmd = prefix .. cmd end
+    end
     return os.execute(cmd)
 end
 os.tryrm = function(p)
@@ -250,8 +276,8 @@ raise = function(msg) error(msg or "raise called", 2) end
 
 -- string.replace: xmake compat (plain text replacement)
 if not string.replace then
-    function string.replace(s, old, new)
-        -- Plain text replacement (not pattern)
+    function string.replace(s, old, new, opts)
+        -- Plain text replacement (not pattern); opts accepted for xmake compat but ignored
         local result = s
         local i = 1
         while true do
@@ -447,6 +473,7 @@ function M.add(name, opt)
         type     = opt.type or "",
         filename = opt.filename or "",
         binding  = opt.binding or "",
+        envs     = opt.envs or nil,
     }
     if _log_enabled then
         io.write("[xim:xpkg]: xvm add " .. name .. " version=" .. entry.version .. "\n")
@@ -465,15 +492,81 @@ function M.use(name, version)
     -- stub: version switching handled by C++ side
 end
 
+-- Load VersionDB from ~/.xlings/.xlings.json
+local _versions_cache = nil
+local function _load_versions()
+    if _versions_cache then return _versions_cache end
+    local home = os.getenv("HOME") or os.getenv("USERPROFILE") or ""
+    local config_path = home .. "/.xlings/.xlings.json"
+    local f = io.open(config_path, "r")
+    if not f then return nil end
+    local content = f:read("*a"); f:close()
+    if not content or content == "" then return nil end
+    -- Use json module if available, otherwise minimal parse
+    local ok_json, json_mod = pcall(require, "xim.libxpkg.json")
+    if not ok_json then
+        -- Try loading from _LIBXPKG_MODULES
+        json_mod = _LIBXPKG_MODULES and _LIBXPKG_MODULES["json"]
+    end
+    if not json_mod then return nil end
+    local ok, data = pcall(json_mod.decode, content)
+    if not ok or type(data) ~= "table" then return nil end
+    _versions_cache = data.versions or {}
+    return _versions_cache
+end
+
 function M.has(name, version)
+    -- Check pending ops first (current session adds)
     for _, entry in ipairs(_XVM_OPS) do
         if entry.op == "add" and entry.name == name then return true end
+    end
+    -- Check persisted VersionDB
+    local versions = _load_versions()
+    if not versions then return false end
+    local vinfo = versions[name]
+    if not vinfo then return false end
+    if not version or version == "" then return true end
+    if vinfo.versions then
+        for ver_key, _ in pairs(vinfo.versions) do
+            if ver_key == version then return true end
+        end
     end
     return false
 end
 
 function M.info(name, version)
-    return nil  -- stub
+    local versions = _load_versions()
+    if not versions then return nil end
+    local vinfo = versions[name]
+    if not vinfo or not vinfo.versions then return nil end
+
+    -- Find matching version
+    local vdata = nil
+    local matched_version = version or ""
+    if version and version ~= "" then
+        vdata = vinfo.versions[version]
+    end
+    if not vdata then
+        -- Try first available version
+        for ver_key, ver_val in pairs(vinfo.versions) do
+            vdata = ver_val
+            matched_version = ver_key
+            break
+        end
+    end
+    if not vdata then return nil end
+
+    local info_table = {
+        Name = name,
+        Version = matched_version,
+        Type = vinfo.type or "program",
+        Program = vinfo.filename or name,
+        SPath = vdata.path or "",
+        TPath = vdata.path or "",
+        Alias = vdata.alias or nil,
+        Envs = vdata.envs or nil,
+    }
+    return info_table
 end
 
 function M.log_tag(enable)
@@ -590,11 +683,29 @@ end
 
 function M.input_args_process(cmds_kv, args)
     local result = {}
-    for _, arg in ipairs(args or {}) do
-        local k, v = arg:match("^%-%-(%w+)=(.+)$")
-        if k then result[k] = v end
+    local i = 1
+    local arglist = args or {}
+    while i <= #arglist do
+        local arg = arglist[i]
+        -- --key=value format
+        local k, v = arg:match("^(%-%-[%w%-]+)=(.+)$")
+        if k and cmds_kv[k] ~= nil then
+            result[k] = v
+            i = i + 1
+        elseif arg:match("^%-%-") and cmds_kv[arg] ~= nil then
+            -- --key value format
+            if i < #arglist then
+                result[arg] = arglist[i + 1]
+                i = i + 2
+            else
+                result[arg] = true
+                i = i + 1
+            end
+        else
+            i = i + 1
+        end
     end
-    return result
+    return true, result
 end
 
 return M

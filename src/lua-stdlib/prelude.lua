@@ -74,7 +74,8 @@ os.trymv = function(src, dst)
     return rm_ok
 end
 os.mv = function(src, dst) return os.trymv(src, dst) end
-os.cp = function(src, dst)
+os.cp = function(src, dst, opts)
+    -- opts accepted for xmake compat but ignored (cp -a already preserves symlinks)
     -- Try shell cp first (handles directories, symlinks, etc.)
     local sep = _PATH_SEP
     if sep ~= "\\" then
@@ -131,7 +132,32 @@ os.iorun = function(cmd)
     f:close()
     return output or ""
 end
+os.setenv = function(k, v)
+    if _PATH_SEP == "\\" then
+        os.execute(string.format('setx %s "%s"', k, v))
+    else
+        _ENV_OVERRIDES = _ENV_OVERRIDES or {}
+        _ENV_OVERRIDES[k] = v
+    end
+end
+os.addenv = function(k, v)
+    if _PATH_SEP == "\\" then
+        local cur = os.getenv(k) or ""
+        os.execute(string.format('setx %s "%s"', k, cur ~= "" and (cur .. ";" .. v) or v))
+    else
+        _ENV_OVERRIDES = _ENV_OVERRIDES or {}
+        local cur = _ENV_OVERRIDES[k] or os.getenv(k) or ""
+        _ENV_OVERRIDES[k] = cur ~= "" and (cur .. ":" .. v) or v
+    end
+end
 os.exec = function(cmd)
+    if _ENV_OVERRIDES and _PATH_SEP ~= "\\" then
+        local prefix = ""
+        for k, v in pairs(_ENV_OVERRIDES) do
+            prefix = prefix .. string.format('%s="%s" ', k, v)
+        end
+        if prefix ~= "" then cmd = prefix .. cmd end
+    end
     return os.execute(cmd)
 end
 os.tryrm = function(p)
@@ -242,8 +268,8 @@ raise = function(msg) error(msg or "raise called", 2) end
 
 -- string.replace: xmake compat (plain text replacement)
 if not string.replace then
-    function string.replace(s, old, new)
-        -- Plain text replacement (not pattern)
+    function string.replace(s, old, new, opts)
+        -- Plain text replacement (not pattern); opts accepted for xmake compat but ignored
         local result = s
         local i = 1
         while true do

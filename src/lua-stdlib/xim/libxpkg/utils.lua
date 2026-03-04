@@ -29,11 +29,29 @@ end
 
 function M.input_args_process(cmds_kv, args)
     local result = {}
-    for _, arg in ipairs(args or {}) do
-        local k, v = arg:match("^%-%-(%w+)=(.+)$")
-        if k then result[k] = v end
+    local i = 1
+    local arglist = args or {}
+    while i <= #arglist do
+        local arg = arglist[i]
+        -- --key=value format
+        local k, v = arg:match("^(%-%-[%w%-]+)=(.+)$")
+        if k and cmds_kv[k] ~= nil then
+            result[k] = v
+            i = i + 1
+        elseif arg:match("^%-%-") and cmds_kv[arg] ~= nil then
+            -- --key value format
+            if i < #arglist then
+                result[arg] = arglist[i + 1]
+                i = i + 2
+            else
+                result[arg] = true
+                i = i + 1
+            end
+        else
+            i = i + 1
+        end
     end
-    return result
+    return true, result
 end
 
 return M

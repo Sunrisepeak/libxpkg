@@ -34,15 +34,81 @@ function M.use(name, version)
     -- stub: version switching handled by C++ side
 end
 
+-- Load VersionDB from ~/.xlings/.xlings.json
+local _versions_cache = nil
+local function _load_versions()
+    if _versions_cache then return _versions_cache end
+    local home = os.getenv("HOME") or os.getenv("USERPROFILE") or ""
+    local config_path = home .. "/.xlings/.xlings.json"
+    local f = io.open(config_path, "r")
+    if not f then return nil end
+    local content = f:read("*a"); f:close()
+    if not content or content == "" then return nil end
+    -- Use json module if available, otherwise minimal parse
+    local ok_json, json_mod = pcall(require, "xim.libxpkg.json")
+    if not ok_json then
+        -- Try loading from _LIBXPKG_MODULES
+        json_mod = _LIBXPKG_MODULES and _LIBXPKG_MODULES["json"]
+    end
+    if not json_mod then return nil end
+    local ok, data = pcall(json_mod.decode, content)
+    if not ok or type(data) ~= "table" then return nil end
+    _versions_cache = data.versions or {}
+    return _versions_cache
+end
+
 function M.has(name, version)
+    -- Check pending ops first (current session adds)
     for _, entry in ipairs(_XVM_OPS) do
         if entry.op == "add" and entry.name == name then return true end
+    end
+    -- Check persisted VersionDB
+    local versions = _load_versions()
+    if not versions then return false end
+    local vinfo = versions[name]
+    if not vinfo then return false end
+    if not version or version == "" then return true end
+    if vinfo.versions then
+        for ver_key, _ in pairs(vinfo.versions) do
+            if ver_key == version then return true end
+        end
     end
     return false
 end
 
 function M.info(name, version)
-    return nil  -- stub
+    local versions = _load_versions()
+    if not versions then return nil end
+    local vinfo = versions[name]
+    if not vinfo or not vinfo.versions then return nil end
+
+    -- Find matching version
+    local vdata = nil
+    local matched_version = version or ""
+    if version and version ~= "" then
+        vdata = vinfo.versions[version]
+    end
+    if not vdata then
+        -- Try first available version
+        for ver_key, ver_val in pairs(vinfo.versions) do
+            vdata = ver_val
+            matched_version = ver_key
+            break
+        end
+    end
+    if not vdata then return nil end
+
+    local info_table = {
+        Name = name,
+        Version = matched_version,
+        Type = vinfo.type or "program",
+        Program = vinfo.filename or name,
+        SPath = vdata.path or "",
+        TPath = vdata.path or "",
+        Alias = vdata.alias or nil,
+        Envs = vdata.envs or nil,
+    }
+    return info_table
 end
 
 function M.log_tag(enable)

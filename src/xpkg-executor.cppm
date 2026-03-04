@@ -35,6 +35,7 @@ struct XvmOp {
     std::string filename;
     std::string binding;
     std::string includedir; // for headers/remove_headers ops
+    std::vector<std::pair<std::string, std::string>> envs; // environment variables
 };
 
 enum class HookType { Installed, Build, Install, Config, Uninstall };
@@ -290,6 +291,23 @@ public:
                 op.filename   = read_field("filename");
                 op.binding    = read_field("binding");
                 op.includedir = read_field("includedir");
+
+                // Read envs table (key-value pairs)
+                lua::getfield(L_, -1, "envs");
+                if (lua::type(L_, -1) == lua::TTABLE) {
+                    lua::pushnil(L_);
+                    while (lua::next(L_, -2)) {
+                        if (lua::type(L_, -2) == lua::TSTRING &&
+                            lua::type(L_, -1) == lua::TSTRING) {
+                            op.envs.emplace_back(
+                                lua::tostring(L_, -2),
+                                lua::tostring(L_, -1));
+                        }
+                        lua::pop(L_, 1);
+                    }
+                }
+                lua::pop(L_, 1);
+
                 ops.push_back(std::move(op));
             }
             lua::pop(L_, 1);

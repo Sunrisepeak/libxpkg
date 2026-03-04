@@ -15,6 +15,7 @@ function M.add(name, opt)
         type     = opt.type or "",
         filename = opt.filename or "",
         binding  = opt.binding or "",
+        envs     = opt.envs or nil,
     }
     if _log_enabled then
         io.write("[xim:xpkg]: xvm add " .. name .. " version=" .. entry.version .. "\n")

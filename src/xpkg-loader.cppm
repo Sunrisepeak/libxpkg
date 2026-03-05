@@ -16,11 +16,30 @@ namespace mcpplibs::xpkg::loader_detail {
 // third-party packages can still be loaded without crashing.
 void register_loader_sandbox(lua::State* L) {
     lua::L_dostring(L,
-        // no-op import
-        "import = function(...) "
-        "  return setmetatable({}, { "
-        "    __index = function() return function() end end "
-        "  }) "
+        // no-op import: returns a deep proxy and sets it as a global
+        // (matches xmake behavior where import("platform") sets _G.platform)
+        // The proxy returns '' for string operations and nested proxies for
+        // chained access like platform.get_config_info().rundir
+        "do "
+        "  local function make_proxy() "
+        "    local p = setmetatable({}, { "
+        "      __index = function(_, k) "
+        "        return make_proxy() "
+        "      end, "
+        "      __call = function() return make_proxy() end, "
+        "      __tostring = function() return '' end, "
+        "      __concat = function(a, b) return tostring(a) .. tostring(b) end "
+        "    }) "
+        "    return p "
+        "  end "
+        "  import = function(name, ...) "
+        "    local proxy = make_proxy() "
+        "    if type(name) == 'string' then "
+        "      local short = name:match('[^.]+$') or name "
+        "      rawset(_G, short, proxy) "
+        "    end "
+        "    return proxy "
+        "  end "
         "end\n"
 
         // non-standard global stubs
@@ -203,6 +222,156 @@ PlatformMatrix parse_xpm(lua::State* L, int pkg_idx) {
     return xpm;
 }
 
+// Register a build sandbox: provides real filesystem operations needed by
+// pkgindex-build.lua scripts (os.scriptdir, os.files, os.cd, os.execv,
+// io.readfile, io.writefile, path.join, path.basename, cprint).
+void register_build_sandbox(lua::State* L, const fs::path& script_dir) {
+    // Set os.scriptdir to return the actual script directory
+    lua::pushstring(L, script_dir.string().c_str());
+    lua::setglobal(L, "__xpkg_scriptdir__");
+    lua::L_dostring(L,
+        "os.scriptdir = function() return __xpkg_scriptdir__ end\n"
+    );
+
+    // Real path module
+    lua::L_dostring(L,
+        "path = path or {}\n"
+        "path.join = function(...)\n"
+        "  local parts = {}\n"
+        "  for i = 1, select('#', ...) do\n"
+        "    local v = select(i, ...)\n"
+        "    if v ~= nil then parts[#parts+1] = tostring(v) end\n"
+        "  end\n"
+        "  return table.concat(parts, '/')\n"
+        "end\n"
+        "path.filename = function(p) return type(p)=='string' and (p:match('[^/\\\\]+$') or p) or '' end\n"
+        "path.directory = function(p) return type(p)=='string' and (p:match('(.*)[/\\\\]') or '.') or '.' end\n"
+        "path.basename = function(p)\n"
+        "  if type(p) ~= 'string' then return '' end\n"
+        "  local name = p:match('[^/\\\\]+$') or p\n"
+        "  return name:match('(.+)%.[^.]+$') or name\n"
+        "end\n"
+    );
+
+    // Real os.files with glob support (recursive **)
+    lua::L_dostring(L,
+        "os.files = function(pattern)\n"
+        "  local dir = pattern:match('(.*)/') or '.'\n"
+        "  local ext = pattern:match('%.([^./\\\\]+)$') or '*'\n"
+        "  local result = {}\n"
+        "  local function scan(d)\n"
+        "    local p = io.popen('ls -1 \"' .. d .. '\" 2>/dev/null')\n"
+        "    if not p then return end\n"
+        "    for name in p:lines() do\n"
+        "      local full = d .. '/' .. name\n"
+        "      local attr = io.open(full)\n"
+        "      if attr then\n"
+        "        attr:close()\n"
+        "        -- check if it's a directory by trying to list it\n"
+        "        local dp = io.popen('test -d \"' .. full .. '\" && echo d 2>/dev/null')\n"
+        "        local isdir = dp and dp:read('*l') == 'd'\n"
+        "        if dp then dp:close() end\n"
+        "        if isdir then\n"
+        "          scan(full)\n"
+        "        elseif ext == '*' or full:match('%.' .. ext .. '$') then\n"
+        "          result[#result+1] = full\n"
+        "        end\n"
+        "      end\n"
+        "    end\n"
+        "  end\n"
+        "  scan(dir)\n"
+        "  return result\n"
+        "end\n"
+    );
+
+    // os.cd and os.execv are no-ops in the build sandbox.
+    // Git reset (clean + checkout) is handled by C++ in run_pkgindex_build()
+    // BEFORE the Lua script runs, so the script only needs to do file I/O.
+    lua::L_dostring(L,
+        "os.cd = function(dir) end\n"
+        "os.execv = function(cmd, args) end\n"
+    );
+
+    // Real io.readfile / io.writefile
+    lua::L_dostring(L,
+        "io.readfile = function(filepath)\n"
+        "  local f = io.open(filepath, 'r')\n"
+        "  if not f then return '' end\n"
+        "  local content = f:read('*a')\n"
+        "  f:close()\n"
+        "  return content\n"
+        "end\n"
+        "io.writefile = function(filepath, content)\n"
+        "  local f = io.open(filepath, 'w')\n"
+        "  if not f then return end\n"
+        "  f:write(content)\n"
+        "  f:close()\n"
+        "end\n"
+    );
+
+    // cprint stub (just print)
+    lua::L_dostring(L,
+        "cprint = function(...)\n"
+        "  local args = {...}\n"
+        "  local fmt = args[1] or ''\n"
+        "  -- strip color markers ${...}\n"
+        "  fmt = fmt:gsub('%${.-}', '')\n"
+        "  if #args > 1 then\n"
+        "    print(string.format(fmt, table.unpack(args, 2)))\n"
+        "  else\n"
+        "    print(fmt)\n"
+        "  end\n"
+        "end\n"
+    );
+
+    // string.endswith
+    lua::L_dostring(L,
+        "function string:endswith(suffix)\n"
+        "  return suffix == '' or self:sub(-#suffix) == suffix\n"
+        "end\n"
+    );
+}
+
+// Run pkgindex-build.lua's install() function to generate complete package files.
+// Returns true if a build script was found and executed successfully.
+bool run_pkgindex_build(const fs::path& repo_dir) {
+    auto build_script = repo_dir / "pkgindex-build.lua";
+    if (!fs::exists(build_script)) return false;
+
+    // Reset pkgs dir via git to ensure clean state before the build script
+    // modifies files. Use git -C to avoid changing working directory.
+    if (fs::exists(repo_dir / ".git")) {
+        auto cmd = "git -C \"" + repo_dir.string() + "\" checkout -- pkgs/ 2>/dev/null";
+        std::system(cmd.c_str());
+    }
+
+    lua::State* L = lua::L_newstate();
+    if (!L) return false;
+    lua::L_openlibs(L);
+
+    // Register build sandbox with real filesystem operations
+    register_build_sandbox(L, repo_dir);
+
+    // Execute the build script
+    if (lua::L_dofile(L, build_script.string().c_str()) != lua::OK) {
+        std::string err = lua::tostring(L, -1);
+        lua::close(L);
+        return false;
+    }
+
+    // Call install() function
+    lua::getglobal(L, "install");
+    if (lua::type(L, -1) != lua::TFUNCTION) {
+        lua::close(L);
+        return false;
+    }
+
+    int rc = lua::pcall(L, 0, 1, 0);
+    bool ok = (rc == lua::OK);
+    lua::close(L);
+    return ok;
+}
+
 } // namespace mcpplibs::xpkg::loader_detail
 
 export namespace mcpplibs::xpkg {
@@ -264,6 +433,9 @@ build_index(const fs::path& repo_dir, const std::string& namespace_ = "") {
     auto pkgs_dir = repo_dir / "pkgs";
     if (!fs::is_directory(pkgs_dir))
         return std::unexpected("pkgs/ directory not found in: " + repo_dir.string());
+
+    // Run pkgindex-build.lua if present (generates complete package files)
+    loader_detail::run_pkgindex_build(repo_dir);
 
     for (auto& letter_dir : fs::directory_iterator(pkgs_dir)) {
         if (!letter_dir.is_directory()) continue;

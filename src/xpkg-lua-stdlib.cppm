@@ -23,13 +23,22 @@ function import(mod_path)
         _G[name] = _LIBXPKG_MODULES[name]
         return _LIBXPKG_MODULES[name]
     end
-    -- Stub for unknown imports (base.runtime etc.)
+    -- Stub for unknown imports (platform, base.runtime, etc.)
     io.write("[libxpkg] WARNING: unknown module '" .. mod_path .. "', returning stub\n")
     io.flush()
+    local short = mod_path:match("[^.]+$") or mod_path
+    local function make_proxy()
+        return setmetatable({}, {
+            __index = function(_, k) return make_proxy() end,
+            __call = function() return make_proxy() end,
+            __tostring = function() return '' end,
+            __concat = function(a, b) return tostring(a) .. tostring(b) end,
+        })
+    end
     local stub = setmetatable({}, {
-        __index = function(_, k) return function(...) end end
+        __index = function(_, k) return make_proxy() end,
     })
-    if name then _G[name] = stub end
+    _G[short] = stub
     return stub
 end
 

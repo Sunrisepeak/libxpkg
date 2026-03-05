@@ -729,14 +729,14 @@ function M.install(target)
     if not target or target == "" then return end
     io.write("[xim:xpkg]: pkgmanager.install(" .. tostring(target) .. ")\n")
     io.flush()
-    os.execute("xim -i " .. target .. " -y --disable-info")
+    os.execute("xlings install " .. target .. " -y")
 end
 
 function M.remove(target)
     if not target or target == "" then return end
     io.write("[xim:xpkg]: pkgmanager.remove(" .. tostring(target) .. ")\n")
     io.flush()
-    os.execute("xim -r " .. target .. " -y --disable-info")
+    os.execute("xlings remove " .. target .. " -y")
 end
 
 function M.uninstall(target)

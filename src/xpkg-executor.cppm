@@ -38,6 +38,11 @@ struct XvmOp {
     std::vector<std::pair<std::string, std::string>> envs; // environment variables
 };
 
+struct InstallRequest {
+    std::string op;      // "install" | "remove"
+    std::string target;  // e.g. "scode:linux-headers@5.11.1"
+};
+
 enum class HookType { Installed, Build, Install, Config, Uninstall };
 
 } // export namespace mcpplibs::xpkg
@@ -314,6 +319,32 @@ public:
         }
         lua::pop(L_, 1);
         return ops;
+    }
+
+    std::vector<InstallRequest> install_requests() {
+        std::vector<InstallRequest> reqs;
+        lua::getglobal(L_, "_INSTALL_REQUESTS");
+        if (lua::type(L_, -1) != lua::TTABLE) {
+            lua::pop(L_, 1);
+            return reqs;
+        }
+        int len = (int)lua::rawlen(L_, -1);
+        for (int i = 1; i <= len; ++i) {
+            lua::rawgeti(L_, -1, i);
+            if (lua::type(L_, -1) == lua::TTABLE) {
+                InstallRequest req;
+                lua::getfield(L_, -1, "op");
+                if (lua::type(L_, -1) == lua::TSTRING) req.op = lua::tostring(L_, -1);
+                lua::pop(L_, 1);
+                lua::getfield(L_, -1, "target");
+                if (lua::type(L_, -1) == lua::TSTRING) req.target = lua::tostring(L_, -1);
+                lua::pop(L_, 1);
+                reqs.push_back(std::move(req));
+            }
+            lua::pop(L_, 1);
+        }
+        lua::pop(L_, 1);
+        return reqs;
     }
 };
 

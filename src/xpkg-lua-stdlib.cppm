@@ -110,13 +110,15 @@ os.cp = function(src, dst, opts)
 end
 os.dirs = function(pattern)
     local result = {}
-    -- Quote pattern to handle spaces; use platform-appropriate command
     local sep = _PATH_SEP
     local cmd
     if sep == "\\" then
         cmd = 'dir /B /AD "' .. pattern .. '" 2>nul'
     else
-        cmd = 'ls -d "' .. pattern .. '" 2>/dev/null'
+        -- Strip trailing /* to get base dir; use find to avoid glob-quoting issues
+        -- (ls -d "path/*" keeps * inside quotes → shell won't expand it)
+        local base = pattern:match("^(.*)[/]%*$") or pattern
+        cmd = 'find "' .. base .. '" -maxdepth 1 -mindepth 1 -type d 2>/dev/null'
     end
     local f = io.popen(cmd)
     if f then
@@ -423,6 +425,9 @@ end
 local function _resolve_dep_via_xvm(dep_name, dep_version)
     local ok_xvm, xvm_mod = pcall(require, "xim.libxpkg.xvm")
     if not ok_xvm or not xvm_mod then
+        xvm_mod = _LIBXPKG_MODULES and _LIBXPKG_MODULES["xvm"]
+    end
+    if not xvm_mod then
         io.write("[pkginfo:debug] xvm: module not available\n")
         return nil
     end

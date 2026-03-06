@@ -81,6 +81,9 @@ end
 local function _resolve_dep_via_xvm(dep_name, dep_version)
     local ok_xvm, xvm_mod = pcall(require, "xim.libxpkg.xvm")
     if not ok_xvm or not xvm_mod then
+        xvm_mod = _LIBXPKG_MODULES and _LIBXPKG_MODULES["xvm"]
+    end
+    if not xvm_mod then
         io.write("[pkginfo:debug] xvm: module not available\n")
         return nil
     end

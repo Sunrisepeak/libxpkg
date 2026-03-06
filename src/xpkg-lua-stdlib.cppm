@@ -391,31 +391,49 @@ end
 
 local function _resolve_dep_via_scan(dep_name, dep_version)
     local ns, bare = _parse_namespace(dep_name)
+    io.write(string.format("[pkginfo:debug] scan dep=%s ns=%s bare=%s ver=%s\n",
+        dep_name, tostring(ns), bare, tostring(dep_version)))
     -- 1. Search xpkg_dir (lua package files directory)
-    local result = _scan_dir(_RUNTIME and _RUNTIME.xpkg_dir, ns, bare, dep_version)
-    if result then return result end
+    local xpkg_dir = _RUNTIME and _RUNTIME.xpkg_dir
+    io.write(string.format("[pkginfo:debug] step1 xpkg_dir=%s\n", tostring(xpkg_dir)))
+    local result = _scan_dir(xpkg_dir, ns, bare, dep_version)
+    if result then io.write("[pkginfo:debug] found via step1\n"); return result end
     -- 2. Search xpkgs install root (install_dir's grandparent)
     if _RUNTIME and _RUNTIME.install_dir then
         local xpkgs_root = path.directory(path.directory(_RUNTIME.install_dir))
+        io.write(string.format("[pkginfo:debug] step2 xpkgs_root=%s\n", tostring(xpkgs_root)))
         result = _scan_dir(xpkgs_root, ns, bare, dep_version)
-        if result then return result end
+        if result then io.write("[pkginfo:debug] found via step2\n"); return result end
     end
     -- 3. Search project xpkgs (handles global-pkg depending on project-local pkg)
-    if _RUNTIME and _RUNTIME.project_data_dir and _RUNTIME.project_data_dir ~= "" then
-        result = _scan_dir(path.join(_RUNTIME.project_data_dir, "xpkgs"), ns, bare, dep_version)
-        if result then return result end
+    local proj_data = _RUNTIME and _RUNTIME.project_data_dir
+    io.write(string.format("[pkginfo:debug] step3 project_data_dir=%s\n", tostring(proj_data)))
+    if proj_data and proj_data ~= "" then
+        local proj_xpkgs = path.join(proj_data, "xpkgs")
+        io.write(string.format("[pkginfo:debug] step3 proj_xpkgs=%s exists=%s\n",
+            proj_xpkgs, tostring(os.isdir(proj_xpkgs))))
+        result = _scan_dir(proj_xpkgs, ns, bare, dep_version)
+        if result then io.write("[pkginfo:debug] found via step3\n"); return result end
     end
+    io.write("[pkginfo:debug] scan: not found\n")
     return nil
 end
 
 -- Try xvm registry: for "ns:name", try "ns-name" first, then bare "name"
 local function _resolve_dep_via_xvm(dep_name, dep_version)
     local ok_xvm, xvm_mod = pcall(require, "xim.libxpkg.xvm")
-    if not ok_xvm or not xvm_mod then return nil end
+    if not ok_xvm or not xvm_mod then
+        io.write("[pkginfo:debug] xvm: module not available\n")
+        return nil
+    end
     local ns, bare = _parse_namespace(dep_name)
     local candidates = ns and {ns .. "-" .. bare, bare} or {bare}
+    io.write(string.format("[pkginfo:debug] xvm candidates: %s\n",
+        table.concat(candidates, ", ")))
     for _, xvm_name in ipairs(candidates) do
         local info = xvm_mod.info(xvm_name, dep_version)
+        io.write(string.format("[pkginfo:debug] xvm.info(%s) = %s\n",
+            xvm_name, info and ("SPath=" .. tostring(info["SPath"])) or "nil"))
         if info and info["SPath"] and info["SPath"] ~= "" then
             local spath = info["SPath"]
             local pver = (info["Version"] or dep_version or ""):gsub("([%(%)%.%%%+%-%*%?%[%]%^%$])", "%%%1")
@@ -427,6 +445,7 @@ local function _resolve_dep_via_xvm(dep_name, dep_version)
             end
         end
     end
+    io.write("[pkginfo:debug] xvm: not found\n")
     return nil
 end
 

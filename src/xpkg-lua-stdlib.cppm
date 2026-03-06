@@ -56,16 +56,7 @@ os.isfile = function(p)
     -- read(0) returns "" on regular files, nil on directories
     return ok ~= nil
 end
-os.isdir = function(p)
-    local sep = _PATH_SEP
-    if sep == "\\" then
-        local ret = os.execute('if exist "' .. p .. '\\" exit 0')
-        return ret == 0 or ret == true
-    else
-        local ret = os.execute('[ -d "' .. p .. '" ]')
-        return ret == 0 or ret == true
-    end
-end
+-- os.isdir and os.dirs are registered from C++ (std::filesystem) in load_stdlib
 os.host = function()
     return _RUNTIME and _RUNTIME.platform or "linux"
 end
@@ -107,30 +98,6 @@ os.cp = function(src, dst, opts)
     if not outf then return false end
     outf:write(content); outf:close()
     return true
-end
-os.dirs = function(pattern)
-    local result = {}
-    local sep = _PATH_SEP
-    local cmd
-    if sep == "\\" then
-        cmd = 'dir /B /AD "' .. pattern .. '" 2>nul'
-    else
-        -- Strip trailing /* to get base dir; use find to avoid glob-quoting issues
-        -- (ls -d "path/*" keeps * inside quotes → shell won't expand it)
-        local base = pattern:match("^(.*)[/]%*$") or pattern
-        cmd = 'find "' .. base .. '" -maxdepth 1 -mindepth 1 -type d 2>/dev/null'
-    end
-    local f = io.popen(cmd)
-    if f then
-        for line in f:lines() do
-            local clean = line:gsub("[\r\n]+$", "")  -- strip CRLF
-            if clean ~= "" and os.isdir(clean) then
-                table.insert(result, clean)
-            end
-        end
-        f:close()
-    end
-    return result
 end
 os.sleep = function(ms) end  -- stub
 os.cd = function(dir)

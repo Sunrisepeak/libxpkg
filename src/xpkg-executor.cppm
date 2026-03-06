@@ -68,6 +68,58 @@ void set_string_field(lua::State* L, std::string_view key, std::string_view val)
     lua::setfield(L, -2, std::string(key).c_str());
 }
 
+// Register C++ std::filesystem implementations of os.isdir and os.dirs.
+// Called after the Lua prelude to override the shell-based versions.
+void register_os_funcs(lua::State* L) {
+    lua::getglobal(L, "os");
+    if (lua::type(L, -1) != lua::TTABLE) {
+        lua::pop(L, 1);
+        lua::newtable(L);
+        lua::setglobal(L, "os");
+        lua::getglobal(L, "os");
+    }
+
+    // os.isdir(path) -> bool
+    lua::pushcfunction(L, [](lua::State* L) -> int {
+        const char* p = lua::tostring(L, 1);
+        if (!p) { lua::pushboolean(L, 0); return 1; }
+        std::error_code ec;
+        lua::pushboolean(L, fs::is_directory(fs::path(p), ec) ? 1 : 0);
+        return 1;
+    });
+    lua::setfield(L, -2, "isdir");
+
+    // os.dirs(pattern) -> table of absolute dir paths
+    // Accepts "base/*" style pattern; strips trailing /* to get the base directory.
+    lua::pushcfunction(L, [](lua::State* L) -> int {
+        const char* pat = lua::tostring(L, 1);
+        lua::newtable(L);
+        if (!pat) return 1;
+        std::string s(pat);
+        // Strip trailing /* or \*
+        if (s.size() >= 2 && s.back() == '*' &&
+            (s[s.size()-2] == '/' || s[s.size()-2] == '\\')) {
+            s.pop_back(); s.pop_back();
+        }
+        while (!s.empty() && (s.back() == '/' || s.back() == '\\'))
+            s.pop_back();
+        fs::path base(s);
+        std::error_code ec;
+        if (!fs::is_directory(base, ec)) return 1;
+        int idx = 1;
+        for (auto& entry : fs::directory_iterator(base, ec)) {
+            if (entry.is_directory(ec)) {
+                lua::pushstring(L, entry.path().string().c_str());
+                lua::rawseti(L, -2, idx++);
+            }
+        }
+        return 1;
+    });
+    lua::setfield(L, -2, "dirs");
+
+    lua::pop(L, 1); // pop os table
+}
+
 // Load all xim.libxpkg.* modules into _LIBXPKG_MODULES table, then run prelude
 bool load_stdlib(lua::State* L, std::string& err_out) {
     // Create empty _LIBXPKG_MODULES table
@@ -122,6 +174,9 @@ bool load_stdlib(lua::State* L, std::string& err_out) {
         lua::pop(L, 1);
         return false;
     }
+
+    // Override shell-based os.isdir/os.dirs with C++ std::filesystem implementations
+    register_os_funcs(L);
 
     return true;
 }

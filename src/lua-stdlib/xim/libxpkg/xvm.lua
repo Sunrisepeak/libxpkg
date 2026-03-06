@@ -34,26 +34,42 @@ function M.use(name, version)
     -- stub: version switching handled by C++ side
 end
 
--- Load VersionDB from ~/.xlings/.xlings.json
+-- Load VersionDB from config files (global + project)
 local _versions_cache = nil
 local function _load_versions()
     if _versions_cache then return _versions_cache end
-    local home = os.getenv("HOME") or os.getenv("USERPROFILE") or ""
-    local config_path = home .. "/.xlings/.xlings.json"
-    local f = io.open(config_path, "r")
-    if not f then return nil end
-    local content = f:read("*a"); f:close()
-    if not content or content == "" then return nil end
-    -- Use json module if available, otherwise minimal parse
     local ok_json, json_mod = pcall(require, "xim.libxpkg.json")
     if not ok_json then
-        -- Try loading from _LIBXPKG_MODULES
         json_mod = _LIBXPKG_MODULES and _LIBXPKG_MODULES["json"]
     end
     if not json_mod then return nil end
-    local ok, data = pcall(json_mod.decode, content)
-    if not ok or type(data) ~= "table" then return nil end
-    _versions_cache = data.versions or {}
+
+    local function load_file(config_path)
+        local f = io.open(config_path, "r")
+        if not f then return nil end
+        local content = f:read("*a"); f:close()
+        if not content or content == "" then return nil end
+        local ok, data = pcall(json_mod.decode, content)
+        if not ok or type(data) ~= "table" then return nil end
+        return data.versions or nil
+    end
+
+    local merged = {}
+    -- 1. Load global versions from ~/.xlings/.xlings.json
+    local home = os.getenv("HOME") or os.getenv("USERPROFILE") or ""
+    local global_versions = load_file(home .. "/.xlings/.xlings.json")
+    if global_versions then
+        for k, v in pairs(global_versions) do merged[k] = v end
+    end
+    -- 2. Load project versions (project_data_dir is 2 levels below project root)
+    if _RUNTIME and _RUNTIME.project_data_dir and _RUNTIME.project_data_dir ~= "" then
+        local project_dir = path.directory(path.directory(_RUNTIME.project_data_dir))
+        local project_versions = load_file(path.join(project_dir, ".xlings.json"))
+        if project_versions then
+            for k, v in pairs(project_versions) do merged[k] = v end
+        end
+    end
+    _versions_cache = merged
     return _versions_cache
 end
 

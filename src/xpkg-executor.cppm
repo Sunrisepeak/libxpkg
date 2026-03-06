@@ -15,6 +15,7 @@ struct ExecutionContext {
     std::string pkg_name, version, platform, arch;
     fs::path install_file, install_dir;
     fs::path run_dir, xpkg_dir, bin_dir;
+    fs::path project_data_dir;  // project-local data root (empty when no project config)
     std::vector<std::string> deps_list, args;
     std::string subos_sysrootdir;
 };
@@ -136,9 +137,10 @@ void inject_context(lua::State* L, const mcpplibs::xpkg::ExecutionContext& ctx) 
     set_string_field(L, "install_file",     ctx.install_file.string());
     set_string_field(L, "install_dir",      ctx.install_dir.string());
     set_string_field(L, "run_dir",          ctx.run_dir.string());
-    set_string_field(L, "xpkg_dir",         ctx.xpkg_dir.string());
-    set_string_field(L, "bin_dir",          ctx.bin_dir.string());
-    set_string_field(L, "subos_sysrootdir", ctx.subos_sysrootdir);
+    set_string_field(L, "xpkg_dir",          ctx.xpkg_dir.string());
+    set_string_field(L, "bin_dir",           ctx.bin_dir.string());
+    set_string_field(L, "project_data_dir",  ctx.project_data_dir.string());
+    set_string_field(L, "subos_sysrootdir",  ctx.subos_sysrootdir);
 
     // deps_list as array table
     lua::newtable(L);

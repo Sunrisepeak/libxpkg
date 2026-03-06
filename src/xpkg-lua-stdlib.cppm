@@ -400,11 +400,40 @@ local function _resolve_dep_via_scan(dep_name, dep_version)
         result = _scan_dir(xpkgs_root, ns, bare, dep_version)
         if result then return result end
     end
+    -- 3. Search project xpkgs (handles global-pkg depending on project-local pkg)
+    if _RUNTIME and _RUNTIME.project_data_dir and _RUNTIME.project_data_dir ~= "" then
+        result = _scan_dir(path.join(_RUNTIME.project_data_dir, "xpkgs"), ns, bare, dep_version)
+        if result then return result end
+    end
+    return nil
+end
+
+-- Try xvm registry: for "ns:name", try "ns-name" first, then bare "name"
+local function _resolve_dep_via_xvm(dep_name, dep_version)
+    local ok_xvm, xvm_mod = pcall(require, "xim.libxpkg.xvm")
+    if not ok_xvm or not xvm_mod then return nil end
+    local ns, bare = _parse_namespace(dep_name)
+    local candidates = ns and {ns .. "-" .. bare, bare} or {bare}
+    for _, xvm_name in ipairs(candidates) do
+        local info = xvm_mod.info(xvm_name, dep_version)
+        if info and info["SPath"] and info["SPath"] ~= "" then
+            local spath = info["SPath"]
+            local pver = (info["Version"] or dep_version or ""):gsub("([%(%)%.%%%+%-%*%?%[%]%^%$])", "%%%1")
+            if pver ~= "" then
+                local head = spath:match("^(.*)" .. pver)
+                if head then
+                    return path.join(head:gsub("[/\\]+$", ""), info["Version"] or dep_version)
+                end
+            end
+        end
+    end
     return nil
 end
 
 function M.dep_install_dir(dep_name, dep_version)
-    return _resolve_dep_via_scan(dep_name, dep_version)
+    local result = _resolve_dep_via_scan(dep_name, dep_version)
+    if result then return result end
+    return _resolve_dep_via_xvm(dep_name, dep_version)
 end
 
 function M.install_dir(pkgname, pkgversion)
@@ -530,26 +559,42 @@ function M.use(name, version)
     -- stub: version switching handled by C++ side
 end
 
--- Load VersionDB from ~/.xlings/.xlings.json
+-- Load VersionDB from config files (global + project)
 local _versions_cache = nil
 local function _load_versions()
     if _versions_cache then return _versions_cache end
-    local home = os.getenv("HOME") or os.getenv("USERPROFILE") or ""
-    local config_path = home .. "/.xlings/.xlings.json"
-    local f = io.open(config_path, "r")
-    if not f then return nil end
-    local content = f:read("*a"); f:close()
-    if not content or content == "" then return nil end
-    -- Use json module if available, otherwise minimal parse
     local ok_json, json_mod = pcall(require, "xim.libxpkg.json")
     if not ok_json then
-        -- Try loading from _LIBXPKG_MODULES
         json_mod = _LIBXPKG_MODULES and _LIBXPKG_MODULES["json"]
     end
     if not json_mod then return nil end
-    local ok, data = pcall(json_mod.decode, content)
-    if not ok or type(data) ~= "table" then return nil end
-    _versions_cache = data.versions or {}
+
+    local function load_file(config_path)
+        local f = io.open(config_path, "r")
+        if not f then return nil end
+        local content = f:read("*a"); f:close()
+        if not content or content == "" then return nil end
+        local ok, data = pcall(json_mod.decode, content)
+        if not ok or type(data) ~= "table" then return nil end
+        return data.versions or nil
+    end
+
+    local merged = {}
+    -- 1. Load global versions from ~/.xlings/.xlings.json
+    local home = os.getenv("HOME") or os.getenv("USERPROFILE") or ""
+    local global_versions = load_file(home .. "/.xlings/.xlings.json")
+    if global_versions then
+        for k, v in pairs(global_versions) do merged[k] = v end
+    end
+    -- 2. Load project versions (project_data_dir is 2 levels below project root)
+    if _RUNTIME and _RUNTIME.project_data_dir and _RUNTIME.project_data_dir ~= "" then
+        local project_dir = path.directory(path.directory(_RUNTIME.project_data_dir))
+        local project_versions = load_file(path.join(project_dir, ".xlings.json"))
+        if project_versions then
+            for k, v in pairs(project_versions) do merged[k] = v end
+        end
+    end
+    _versions_cache = merged
     return _versions_cache
 end
 

@@ -352,13 +352,28 @@ local function _ends_with(s, suffix)
     return suffix == "" or s:sub(-#suffix) == suffix
 end
 
-local function _resolve_dep_via_scan(dep_name, dep_version)
-    local base = _RUNTIME.xpkg_dir
-    if not base then return nil end
+local function _parse_namespace(name)
+    local ns, bare = name:match("^([^:]+):(.+)$")
+    if ns then return ns, bare end
+    return nil, name
+end
+
+local function _match_store_name(dirname, ns, bare)
+    if ns then
+        -- namespace specified: exact match "ns-x-bare"
+        return dirname == ns .. "-x-" .. bare
+    else
+        -- no namespace: match "bare" or "*-x-bare"
+        return dirname == bare or _ends_with(dirname, "-x-" .. bare)
+    end
+end
+
+local function _scan_dir(base, ns, bare, dep_version)
+    if not base or not os.isdir(base) then return nil end
     local dirs = os.dirs(path.join(base, "*")) or {}
     for _, dep_root in ipairs(dirs) do
         local dirname = path.filename(dep_root)
-        if dirname == dep_name or _ends_with(dirname, "-x-" .. dep_name) then
+        if _match_store_name(dirname, ns, bare) then
             local ver = dep_version
             if not ver then
                 local vers = os.dirs(path.join(dep_root, "*")) or {}
@@ -374,13 +389,27 @@ local function _resolve_dep_via_scan(dep_name, dep_version)
     return nil
 end
 
+local function _resolve_dep_via_scan(dep_name, dep_version)
+    local ns, bare = _parse_namespace(dep_name)
+    -- 1. Search xpkg_dir (lua package files directory)
+    local result = _scan_dir(_RUNTIME and _RUNTIME.xpkg_dir, ns, bare, dep_version)
+    if result then return result end
+    -- 2. Search xpkgs install root (install_dir's grandparent)
+    if _RUNTIME and _RUNTIME.install_dir then
+        local xpkgs_root = path.directory(path.directory(_RUNTIME.install_dir))
+        result = _scan_dir(xpkgs_root, ns, bare, dep_version)
+        if result then return result end
+    end
+    return nil
+end
+
 function M.dep_install_dir(dep_name, dep_version)
     return _resolve_dep_via_scan(dep_name, dep_version)
 end
 
 function M.install_dir(pkgname, pkgversion)
     if not pkgname then
-        return _RUNTIME.install_dir
+        return _RUNTIME and _RUNTIME.install_dir or nil
     end
     local dir = M.dep_install_dir(pkgname, pkgversion)
     if dir then return dir end

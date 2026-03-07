@@ -168,6 +168,67 @@ TEST(ExecutorTest, ApplyElfpatchAuto_WindowsSkipsPatching) {
     fs::remove_all(temp_dir);
 }
 
+TEST(ExecutorTest, ApplyElfpatchAuto_LinuxUsesPatchelfForElf) {
+#ifdef _WIN32
+    GTEST_SKIP() << "Linux tool emulation test is POSIX-specific";
+#endif
+
+    const fs::path temp_dir = make_temp_dir("libxpkg-elfpatch-linux-");
+    const fs::path tools_dir = temp_dir / "tools";
+    const fs::path install_dir = temp_dir / "install";
+    const fs::path lib_dir = install_dir / "lib";
+    const fs::path log_path = temp_dir / "tool.log";
+    const fs::path pkg_path = temp_dir / "elfpatch-linux.lua";
+    const fs::path binary_path = install_dir / "demo-bin";
+
+    fs::create_directories(tools_dir);
+    fs::create_directories(lib_dir);
+
+    write_executable_script(tools_dir / "patchelf",
+                            "#!/bin/sh\n"
+                            "printf 'patchelf %s\\n' \"$*\" >> \"$ELFPATCH_LOG\"\n");
+
+    {
+        std::ofstream binary(binary_path, std::ios::binary);
+        ASSERT_TRUE(binary.good());
+        const unsigned char magic[] = {0x7f, 'E', 'L', 'F', 0, 0, 0, 0};
+        binary.write(reinterpret_cast<const char*>(magic), sizeof(magic));
+    }
+    fs::permissions(binary_path,
+                    fs::perms::owner_read | fs::perms::owner_write | fs::perms::owner_exec,
+                    fs::perm_options::replace);
+
+    write_text(pkg_path,
+               "package = { spec = \"1\", name = \"elfpatch-linux\", xpm = { linux = { [\"latest\"] = { ref = \"1.0.0\" }, [\"1.0.0\"] = { url = \"https://example.com/demo.tar.gz\", sha256 = \"0\" } } } }\n"
+               "local elfpatch = import(\"xim.libxpkg.elfpatch\")\n"
+               "function install()\n"
+               "    elfpatch.auto({ enable = true })\n"
+               "    return true\n"
+               "end\n");
+
+    const std::string original_path = std::getenv("PATH") ? std::getenv("PATH") : "";
+    ScopedEnvVar path_env("PATH", tools_dir.string() + ":" + original_path);
+    ScopedEnvVar log_env("ELFPATCH_LOG", log_path.string());
+
+    auto exec = create_executor(pkg_path);
+    ASSERT_TRUE(exec.has_value()) << (exec ? "" : exec.error());
+
+    auto hook_result = exec->run_hook(HookType::Install, make_context(install_dir, "linux"));
+    ASSERT_TRUE(hook_result.success) << hook_result.error;
+
+    auto patch_result = exec->apply_elfpatch_auto();
+    EXPECT_TRUE(patch_result.success) << patch_result.error;
+    EXPECT_EQ(patch_result.output, "1 1 0");
+
+    std::ifstream log_file(log_path);
+    std::ostringstream log_buffer;
+    log_buffer << log_file.rdbuf();
+    const std::string log = log_buffer.str();
+    EXPECT_NE(log.find("--set-rpath " + lib_dir.string()), std::string::npos);
+
+    fs::remove_all(temp_dir);
+}
+
 TEST(ExecutorTest, ApplyElfpatchAuto_MacOsUsesInstallNameToolForMachO) {
 #ifdef _WIN32
     GTEST_SKIP() << "macOS tool emulation test is POSIX-specific";
@@ -233,6 +294,64 @@ TEST(ExecutorTest, ApplyElfpatchAuto_MacOsUsesInstallNameToolForMachO) {
     EXPECT_NE(log.find("-add_rpath " + lib_dir.string()), std::string::npos);
     EXPECT_NE(log.find("-change /opt/demo/lib/libdemo.dylib @rpath/libdemo.dylib " + binary_path.string()),
               std::string::npos);
+
+    fs::remove_all(temp_dir);
+}
+
+TEST(ExecutorTest, ApplyElfpatchAuto_MacOsAddRpathFailureCountsAsFailed) {
+#ifdef _WIN32
+    GTEST_SKIP() << "macOS tool emulation test is POSIX-specific";
+#endif
+
+    const fs::path temp_dir = make_temp_dir("libxpkg-elfpatch-macos-rpath-fail-");
+    const fs::path tools_dir = temp_dir / "tools";
+    const fs::path install_dir = temp_dir / "install";
+    const fs::path lib_dir = install_dir / "lib";
+    const fs::path pkg_path = temp_dir / "elfpatch-macos.lua";
+    const fs::path binary_path = install_dir / "demo-bin";
+
+    fs::create_directories(tools_dir);
+    fs::create_directories(lib_dir);
+
+    write_executable_script(tools_dir / "install_name_tool",
+                            "#!/bin/sh\n"
+                            "exit 1\n");
+    write_executable_script(tools_dir / "otool",
+                            "#!/bin/sh\n"
+                            "if [ \"$1\" = \"-L\" ]; then\n"
+                            "  printf '%s:\\n' \"$2\"\n"
+                            "fi\n");
+
+    {
+        std::ofstream binary(binary_path, std::ios::binary);
+        ASSERT_TRUE(binary.good());
+        const unsigned char magic[] = {0xfe, 0xed, 0xfa, 0xcf, 0, 0, 0, 0};
+        binary.write(reinterpret_cast<const char*>(magic), sizeof(magic));
+    }
+    fs::permissions(binary_path,
+                    fs::perms::owner_read | fs::perms::owner_write | fs::perms::owner_exec,
+                    fs::perm_options::replace);
+
+    write_text(pkg_path,
+               "package = { spec = \"1\", name = \"elfpatch-macos\", xpm = { macosx = { [\"latest\"] = { ref = \"1.0.0\" }, [\"1.0.0\"] = { url = \"https://example.com/demo.tar.gz\", sha256 = \"0\" } } } }\n"
+               "local elfpatch = import(\"xim.libxpkg.elfpatch\")\n"
+               "function install()\n"
+               "    elfpatch.auto({ enable = true })\n"
+               "    return true\n"
+               "end\n");
+
+    const std::string original_path = std::getenv("PATH") ? std::getenv("PATH") : "";
+    ScopedEnvVar path_env("PATH", tools_dir.string() + ":" + original_path);
+
+    auto exec = create_executor(pkg_path);
+    ASSERT_TRUE(exec.has_value()) << (exec ? "" : exec.error());
+
+    auto hook_result = exec->run_hook(HookType::Install, make_context(install_dir, "macosx"));
+    ASSERT_TRUE(hook_result.success) << hook_result.error;
+
+    auto patch_result = exec->apply_elfpatch_auto();
+    EXPECT_TRUE(patch_result.success) << patch_result.error;
+    EXPECT_EQ(patch_result.output, "1 0 1");
 
     fs::remove_all(temp_dir);
 }

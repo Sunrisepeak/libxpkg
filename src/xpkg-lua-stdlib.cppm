@@ -1185,12 +1185,18 @@ local function _patch_macho(target, opts, result)
                 .. " -add_rpath "
                 .. _shell_quote(rp) .. " "
                 .. _shell_quote(filepath))
-            if not add_ok and opts.strict then
-                error("failed to add rpath " .. rp .. " for " .. filepath)
+            if not add_ok then
+                if opts.strict then
+                    error("failed to add rpath " .. rp .. " for " .. filepath)
+                end
+                ok = false
             end
         end
 
-        local fix_ok = _fix_macho_dylib_refs(tool, filepath, opts)
+        local fix_ok = true
+        if ok then
+            fix_ok = _fix_macho_dylib_refs(tool, filepath, opts)
+        end
         if fix_ok == false and opts.strict ~= true then
             ok = false
         end

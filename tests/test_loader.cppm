@@ -11,10 +11,13 @@ using namespace mcpplibs::xpkg;
 namespace fs = std::filesystem;
 
 #ifndef XPKG_TEST_PKGINDEX
-#  define XPKG_TEST_PKGINDEX "tests/fixtures/pkgindex"
+#  define XPKG_TEST_PKGINDEX tests/fixtures/pkgindex
 #endif
 
-static const fs::path PKGINDEX{ XPKG_TEST_PKGINDEX };
+#define XPKG_STRINGIFY_IMPL(x) #x
+#define XPKG_STRINGIFY(x) XPKG_STRINGIFY_IMPL(x)
+
+static const fs::path PKGINDEX{ XPKG_STRINGIFY(XPKG_TEST_PKGINDEX) };
 
 TEST(LoaderTest, LoadPackage_MissingFile) {
     auto result = load_package("/nonexistent/pkg.lua");

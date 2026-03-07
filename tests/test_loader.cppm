@@ -17,7 +17,16 @@ namespace fs = std::filesystem;
 #define XPKG_STRINGIFY_IMPL(x) #x
 #define XPKG_STRINGIFY(x) XPKG_STRINGIFY_IMPL(x)
 
-static const fs::path PKGINDEX{ XPKG_STRINGIFY(XPKG_TEST_PKGINDEX) };
+constexpr std::string_view normalize_pkgindex_macro(std::string_view value) {
+    if (value.size() >= 2 && value.front() == '"' && value.back() == '"') {
+        return value.substr(1, value.size() - 2);
+    }
+    return value;
+}
+
+static const fs::path PKGINDEX{
+    std::string(normalize_pkgindex_macro(XPKG_STRINGIFY(XPKG_TEST_PKGINDEX)))
+};
 
 TEST(LoaderTest, LoadPackage_MissingFile) {
     auto result = load_package("/nonexistent/pkg.lua");

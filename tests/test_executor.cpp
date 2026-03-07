@@ -14,10 +14,19 @@ namespace fs = std::filesystem;
 #define XPKG_STRINGIFY_IMPL(x) #x
 #define XPKG_STRINGIFY(x) XPKG_STRINGIFY_IMPL(x)
 
-static const fs::path PKGINDEX{ XPKG_STRINGIFY(XPKG_TEST_PKGINDEX) };
-static const fs::path HELLO_PKG = PKGINDEX / "pkgs/h/hello.lua";
-
 namespace {
+
+std::string_view normalize_pkgindex_macro(std::string_view value) {
+    if (value.size() >= 2 && value.front() == '"' && value.back() == '"') {
+        return value.substr(1, value.size() - 2);
+    }
+    return value;
+}
+
+static const fs::path PKGINDEX{
+    std::string(normalize_pkgindex_macro(XPKG_STRINGIFY(XPKG_TEST_PKGINDEX)))
+};
+static const fs::path HELLO_PKG = PKGINDEX / "pkgs/h/hello.lua";
 
 fs::path make_temp_dir(std::string_view prefix) {
     auto dir = fs::temp_directory_path() / fs::path(prefix);

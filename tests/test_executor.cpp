@@ -140,6 +140,44 @@ TEST(ExecutorTest, HasHook_Installed_True) {
     EXPECT_TRUE(exec->has_hook(HookType::Installed));
 }
 
+TEST(ExecutorTest, RunScriptCallsXpkgMain) {
+    auto tmp = fs::temp_directory_path() / "test_run_script.lua";
+    {
+        std::ofstream out(tmp);
+        out << R"(
+            package = { name = "test-script", xpm = { linux = { ["0.0.1"] = {} } } }
+            _test_result = nil
+            function xpkg_main(a, b)
+                _test_result = (a or "") .. ":" .. (b or "")
+            end
+        )";
+    }
+    auto exec = create_executor(tmp);
+    ASSERT_TRUE(exec.has_value()) << (exec ? "" : exec.error());
+    ExecutionContext ctx;
+    ctx.platform = "linux";
+    ctx.args = {"hello", "world"};
+    auto result = exec->run_script(ctx);
+    EXPECT_TRUE(result.success) << result.error;
+    fs::remove(tmp);
+}
+
+TEST(ExecutorTest, RunScriptFailsWithoutXpkgMain) {
+    auto tmp = fs::temp_directory_path() / "test_run_script_no_main.lua";
+    {
+        std::ofstream out(tmp);
+        out << "package = { name = \"no-main\", xpm = { linux = { [\"0.0.1\"] = {} } } }\n";
+    }
+    auto exec = create_executor(tmp);
+    ASSERT_TRUE(exec.has_value()) << (exec ? "" : exec.error());
+    ExecutionContext ctx;
+    ctx.platform = "linux";
+    auto result = exec->run_script(ctx);
+    EXPECT_FALSE(result.success);
+    EXPECT_NE(result.error.find("xpkg_main"), std::string::npos);
+    fs::remove(tmp);
+}
+
 TEST(ExecutorTest, ApplyElfpatchAuto_DisabledReturnsZeroCounts) {
     auto exec = create_executor(HELLO_PKG);
     ASSERT_TRUE(exec.has_value()) << (exec ? "" : exec.error());

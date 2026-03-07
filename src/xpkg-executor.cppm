@@ -378,6 +378,38 @@ public:
         return ops;
     }
 
+    // Run the script's xpkg_main() function with arguments.
+    HookResult run_script(const ExecutionContext& ctx) {
+        detail::inject_context(L_, ctx);
+
+        lua::newtable(L_);
+        lua::setglobal(L_, "_XVM_OPS");
+        lua::newtable(L_);
+        lua::setglobal(L_, "_INSTALL_REQUESTS");
+
+        lua::getglobal(L_, "xpkg_main");
+        if (lua::type(L_, -1) != lua::TFUNCTION) {
+            lua::pop(L_, 1);
+            return HookResult{ .success = false,
+                               .error = "xpkg_main not found in script" };
+        }
+
+        int nargs = static_cast<int>(ctx.args.size());
+        for (auto& arg : ctx.args) {
+            lua::pushstring(L_, arg.c_str());
+        }
+
+        HookResult result;
+        if (lua::pcall(L_, nargs, 0, 0) == lua::OK) {
+            result.success = true;
+        } else {
+            result.success = false;
+            result.error = lua::tostring(L_, -1);
+            lua::pop(L_, 1);
+        }
+        return result;
+    }
+
     std::vector<InstallRequest> install_requests() {
         std::vector<InstallRequest> reqs;
         lua::getglobal(L_, "_INSTALL_REQUESTS");

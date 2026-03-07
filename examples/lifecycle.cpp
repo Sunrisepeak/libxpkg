@@ -11,7 +11,19 @@ using namespace mcpplibs::xpkg;
 #  define XPKG_FIXTURES_DIR "tests/fixtures"
 #endif
 
-static const fs::path PKGINDEX  = fs::path(XPKG_FIXTURES_DIR) / "pkgindex";
+#define XPKG_STRINGIFY_IMPL(x) #x
+#define XPKG_STRINGIFY(x) XPKG_STRINGIFY_IMPL(x)
+
+constexpr std::string_view normalize_fixtures_macro(std::string_view value) {
+    if (value.size() >= 2 && value.front() == '"' && value.back() == '"') {
+        return value.substr(1, value.size() - 2);
+    }
+    return value;
+}
+
+static const fs::path PKGINDEX  = fs::path(
+    std::string(normalize_fixtures_macro(XPKG_STRINGIFY(XPKG_FIXTURES_DIR)))
+) / "pkgindex";
 static const fs::path HELLO_PKG = PKGINDEX / "pkgs/h/hello.lua";
 
 int main() {

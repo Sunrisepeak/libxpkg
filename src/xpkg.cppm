@@ -16,6 +16,7 @@ struct PlatformResource {
     std::string url;
     std::string sha256;
     std::string ref;  // version alias, e.g. "latest" -> "1.0.0"
+    std::unordered_map<std::string, std::string> mirrors;  // e.g. "GLOBAL"->url, "CN"->url
 };
 
 struct PlatformMatrix {

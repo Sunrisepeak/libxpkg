@@ -103,6 +103,21 @@ void register_loader_sandbox(lua::State* L) {
     );
 }
 
+std::unordered_map<std::string, std::string> get_str_map(lua::State* L, int idx, const char* key) {
+    std::unordered_map<std::string, std::string> result;
+    lua::getfield(L, idx, key);
+    if (lua::type(L, -1) == lua::TTABLE) {
+        lua::pushnil(L);
+        while (lua::next(L, -2)) {
+            if (lua::type(L, -2) == lua::TSTRING && lua::type(L, -1) == lua::TSTRING)
+                result[lua::tostring(L, -2)] = lua::tostring(L, -1);
+            lua::pop(L, 1);
+        }
+    }
+    lua::pop(L, 1);
+    return result;
+}
+
 std::string get_str(lua::State* L, int idx, const char* key) {
     lua::getfield(L, idx, key);
     std::string r;
@@ -204,6 +219,13 @@ PlatformMatrix parse_xpm(lua::State* L, int pkg_idx) {
                     if (lua::type(L, -1) == lua::TTABLE) {
                         int res_idx = lua::gettop(L);
                         res.url    = get_str(L, res_idx, "url");
+                        if (res.url.empty()) {
+                            res.mirrors = get_str_map(L, res_idx, "url");
+                            if (auto it = res.mirrors.find("GLOBAL"); it != res.mirrors.end())
+                                res.url = it->second;
+                            else if (!res.mirrors.empty())
+                                res.url = res.mirrors.begin()->second;
+                        }
                         res.sha256 = get_str(L, res_idx, "sha256");
                         res.ref    = get_str(L, res_idx, "ref");
                     } else if (lua::type(L, -1) == lua::TSTRING) {

@@ -143,7 +143,9 @@ void register_os_funcs(lua::State* L) {
         if (fs::is_directory(sp, ec) && fs::is_directory(dp, ec))
             dp /= sp.filename();
         fs::copy(sp, dp,
-                 fs::copy_options::recursive | fs::copy_options::overwrite_existing, ec);
+                 fs::copy_options::recursive |
+                 fs::copy_options::copy_symlinks |
+                 fs::copy_options::overwrite_existing, ec);
         lua::pushboolean(L, ec ? 0 : 1);
         return 1;
     });
@@ -162,7 +164,10 @@ void register_os_funcs(lua::State* L) {
         if (!ec) { lua::pushboolean(L, 1); return 1; }
         // Cross-device: copy + remove
         ec.clear();
-        fs::copy(src, dst, fs::copy_options::recursive | fs::copy_options::overwrite_existing, ec);
+        fs::copy(src, dst,
+                 fs::copy_options::recursive |
+                 fs::copy_options::copy_symlinks |
+                 fs::copy_options::overwrite_existing, ec);
         if (ec) { lua::pushboolean(L, 0); return 1; }
         fs::remove_all(src, ec);
         lua::pushboolean(L, 1);

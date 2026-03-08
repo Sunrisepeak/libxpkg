@@ -608,3 +608,32 @@ TEST(ExecutorTest, ApplyElfpatchAuto_MacOsMissingToolSkipsGracefully) {
 
     fs::remove_all(temp_dir);
 }
+
+TEST(ExecutorTest, OsFuncs_Cp_PreservesSymlinks) {
+#ifdef _WIN32
+    GTEST_SKIP() << "Symlink preservation test is POSIX-specific";
+#endif
+
+    const fs::path temp = make_temp_dir("libxpkg-oscp-symlink-");
+    const fs::path src = temp / "src_dir";
+    const fs::path dst = temp / "dst_dir";
+    fs::create_directories(src);
+    write_text(src / "real.txt", "hello");
+    fs::create_symlink("real.txt", src / "link.txt");
+
+    auto pkg = temp / "oscp_sym.lua";
+    write_text(pkg, std::string(
+        "package = { name = \"oscp_sym\", xpm = { linux = { [\"0.0.1\"] = {} } } }\n"
+        "function xpkg_main(s, d) return os.cp(s, d) end\n"));
+    auto exec = create_executor(pkg);
+    ASSERT_TRUE(exec.has_value()) << exec.error();
+    ExecutionContext ctx;
+    ctx.platform = "linux";
+    ctx.args = {src.string(), dst.string()};
+    auto r = exec->run_script(ctx);
+    EXPECT_TRUE(r.success) << r.error;
+    EXPECT_TRUE(fs::is_symlink(dst / "link.txt"))
+        << "link.txt should remain a symlink after os.cp";
+    EXPECT_EQ(fs::read_symlink(dst / "link.txt").string(), "real.txt");
+    fs::remove_all(temp);
+}

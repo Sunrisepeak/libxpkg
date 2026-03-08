@@ -40,9 +40,10 @@ jobs:
           curl -fsSL https://raw.githubusercontent.com/d2learn/xlings/refs/heads/main/tools/other/quick_install.sh | bash
           echo "PATH=$HOME/.xlings/subos/current/bin:$PATH" >> "$GITHUB_ENV"
 
-      - name: Install GCC 15.1 with Xlings
+      - name: Install Project Dependencies by Xlings
         run: |
-          xlings install gcc@15.1 -y
+          xlings install
+          xmake --version
 
       - name: Build
         run: |

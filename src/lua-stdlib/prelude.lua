@@ -125,12 +125,7 @@ end
 os.sleep = function(ms) end  -- stub
 os.cd = function(dir)
     if not dir then return false end
-    -- Lua has no built-in chdir; use lfs if available, else shell fallback
-    local ok, lfs = pcall(require, "lfs")
-    if ok and lfs and lfs.chdir then
-        return lfs.chdir(dir)
-    end
-    -- Fallback: not truly possible from pure Lua, but we set _CD for scripts
+    -- Fallback: pure Lua cannot chdir; C++ override replaces this after prelude
     _CURRENT_DIR = dir
     return true
 end

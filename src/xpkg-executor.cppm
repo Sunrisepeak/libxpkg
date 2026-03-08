@@ -117,6 +117,19 @@ void register_os_funcs(lua::State* L) {
     });
     lua::setfield(L, -2, "dirs");
 
+    // os.cd(dir) -> bool
+    // Real chdir so that subsequent os.execute / system.exec inherit the new CWD.
+    // Safe: hook calls are wrapped in ScopedCurrentDir_ which restores CWD on return.
+    lua::pushcfunction(L, [](lua::State* L) -> int {
+        const char* p = lua::tostring(L, 1);
+        if (!p) { lua::pushboolean(L, 0); return 1; }
+        std::error_code ec;
+        fs::current_path(fs::path(p), ec);
+        lua::pushboolean(L, ec ? 0 : 1);
+        return 1;
+    });
+    lua::setfield(L, -2, "cd");
+
     lua::pop(L, 1); // pop os table
 }
 

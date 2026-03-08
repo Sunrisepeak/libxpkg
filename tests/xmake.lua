@@ -21,6 +21,9 @@ target("xpkg_loader_test")
         local dir = path.join(os.projectdir(), "tests", "fixtures", "pkgindex")
         dir = dir:gsub("\\", "/")
         target:add("defines", 'XPKG_TEST_PKGINDEX="' .. dir .. '"')
+        local build_dir = path.join(os.projectdir(), "tests", "fixtures", "pkgindex-build")
+        build_dir = build_dir:gsub("\\", "/")
+        target:add("defines", 'XPKG_TEST_PKGINDEX_BUILD="' .. build_dir .. '"')
     end)
 
 -- Index tests — mcpplibs.xpkg + mcpplibs.xpkg.index, pure C++

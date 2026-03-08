@@ -14,6 +14,10 @@ namespace fs = std::filesystem;
 #  define XPKG_TEST_PKGINDEX tests/fixtures/pkgindex
 #endif
 
+#ifndef XPKG_TEST_PKGINDEX_BUILD
+#  define XPKG_TEST_PKGINDEX_BUILD tests/fixtures/pkgindex-build
+#endif
+
 #define XPKG_STRINGIFY_IMPL(x) #x
 #define XPKG_STRINGIFY(x) XPKG_STRINGIFY_IMPL(x)
 
@@ -26,6 +30,10 @@ constexpr std::string_view normalize_pkgindex_macro(std::string_view value) {
 
 static const fs::path PKGINDEX{
     std::string(normalize_pkgindex_macro(XPKG_STRINGIFY(XPKG_TEST_PKGINDEX)))
+};
+
+static const fs::path PKGINDEX_BUILD{
+    std::string(normalize_pkgindex_macro(XPKG_STRINGIFY(XPKG_TEST_PKGINDEX_BUILD)))
 };
 
 TEST(LoaderTest, LoadPackage_MissingFile) {
@@ -54,4 +62,23 @@ TEST(LoaderTest, BuildIndex_ReturnsEntries) {
     ASSERT_TRUE(result.has_value()) << result.error();
     EXPECT_GT(result->entries.size(), 0u);
     EXPECT_GT(result->entries.count("hello"), 0u);
+}
+
+TEST(LoaderTest, BuildIndex_PkgindexBuild_OsFiles) {
+    // Tests that build_index works with pkgindex-build.lua that uses os.files()
+    // This validates the C++ std::filesystem implementation works cross-platform
+    auto result = build_index(PKGINDEX_BUILD);
+    ASSERT_TRUE(result.has_value()) << result.error();
+    EXPECT_GT(result->entries.count("testbuild"), 0u);
+}
+
+TEST(LoaderTest, BuildIndex_PkgindexBuild_TemplateAppended) {
+    // After pkgindex-build runs, the testbuild package should have xpm data
+    // from the appended template
+    auto result = build_index(PKGINDEX_BUILD);
+    ASSERT_TRUE(result.has_value()) << result.error();
+    auto pkg = load_package(result->entries.at("testbuild").path);
+    ASSERT_TRUE(pkg.has_value()) << pkg.error();
+    // Template adds xpm with linux/windows/macosx platforms
+    EXPECT_FALSE(pkg->xpm.entries.empty()) << "template xpm should have been appended by pkgindex-build";
 }

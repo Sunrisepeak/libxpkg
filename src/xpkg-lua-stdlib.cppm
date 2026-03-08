@@ -133,12 +133,7 @@ end
 os.sleep = function(ms) end  -- stub
 os.cd = function(dir)
     if not dir then return false end
-    -- Lua has no built-in chdir; use lfs if available, else shell fallback
-    local ok, lfs = pcall(require, "lfs")
-    if ok and lfs and lfs.chdir then
-        return lfs.chdir(dir)
-    end
-    -- Fallback: not truly possible from pure Lua, but we set _CD for scripts
+    -- Fallback: pure Lua cannot chdir; C++ override replaces this after prelude
     _CURRENT_DIR = dir
     return true
 end
@@ -602,9 +597,13 @@ local function _load_versions()
     end
 
     local merged = {}
-    -- 1. Load global versions from ~/.xlings/.xlings.json
-    local home = os.getenv("HOME") or os.getenv("USERPROFILE") or ""
-    local global_versions = load_file(home .. "/.xlings/.xlings.json")
+    -- 1. Load global versions: prefer XLINGS_HOME, fallback to ~/.xlings
+    local xlings_home = os.getenv("XLINGS_HOME")
+    if not xlings_home or xlings_home == "" then
+        local home = os.getenv("HOME") or os.getenv("USERPROFILE") or ""
+        xlings_home = home .. "/.xlings"
+    end
+    local global_versions = load_file(xlings_home .. "/.xlings.json")
     if global_versions then
         for k, v in pairs(global_versions) do merged[k] = v end
     end

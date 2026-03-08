@@ -253,36 +253,62 @@ void register_build_sandbox(lua::State* L, const fs::path& script_dir) {
         "end\n"
     );
 
-    // Real os.files with glob support (recursive **)
-    lua::L_dostring(L,
-        "os.files = function(pattern)\n"
-        "  local dir = pattern:match('(.*)/') or '.'\n"
-        "  local ext = pattern:match('%.([^./\\\\]+)$') or '*'\n"
-        "  local result = {}\n"
-        "  local function scan(d)\n"
-        "    local p = io.popen('ls -1 \"' .. d .. '\" 2>/dev/null')\n"
-        "    if not p then return end\n"
-        "    for name in p:lines() do\n"
-        "      local full = d .. '/' .. name\n"
-        "      local attr = io.open(full)\n"
-        "      if attr then\n"
-        "        attr:close()\n"
-        "        -- check if it's a directory by trying to list it\n"
-        "        local dp = io.popen('test -d \"' .. full .. '\" && echo d 2>/dev/null')\n"
-        "        local isdir = dp and dp:read('*l') == 'd'\n"
-        "        if dp then dp:close() end\n"
-        "        if isdir then\n"
-        "          scan(full)\n"
-        "        elseif ext == '*' or full:match('%.' .. ext .. '$') then\n"
-        "          result[#result+1] = full\n"
-        "        end\n"
-        "      end\n"
-        "    end\n"
-        "  end\n"
-        "  scan(dir)\n"
-        "  return result\n"
-        "end\n"
-    );
+    // Register C++ implementations of os.files / os.isdir on the os table
+    lua::getglobal(L, "os");
+
+    // os.files(pattern) -> table of file paths (recursive)
+    // Implemented in C++ via std::filesystem — fully cross-platform.
+    lua::pushcfunction(L, [](lua::State* L) -> int {
+        const char* pat = lua::tostring(L, 1);
+        lua::newtable(L);
+        if (!pat) return 1;
+
+        std::string pattern(pat);
+        // Extract base directory (everything before last '/' or '\')
+        std::string dirStr = ".";
+        auto slash = pattern.rfind('/');
+        auto bslash = pattern.rfind('\\');
+        if (slash == std::string::npos) slash = bslash;
+        else if (bslash != std::string::npos && bslash > slash) slash = bslash;
+        if (slash != std::string::npos) dirStr = pattern.substr(0, slash);
+
+        // Extract extension filter (e.g. "*.lua" -> ".lua")
+        std::string extFilter;
+        auto dot = pattern.rfind('.');
+        if (dot != std::string::npos && (slash == std::string::npos || dot > slash)) {
+            extFilter = pattern.substr(dot);  // includes the dot
+        }
+
+        std::error_code ec;
+        fs::path base(dirStr);
+        if (!fs::is_directory(base, ec)) return 1;
+
+        int idx = 1;
+        for (auto& entry : fs::recursive_directory_iterator(
+                base, fs::directory_options::skip_permission_denied, ec)) {
+            if (ec) break;
+            if (!entry.is_regular_file(ec)) continue;
+            auto& p = entry.path();
+            if (!extFilter.empty() && p.extension().string() != extFilter) continue;
+            // Use generic_string() for consistent '/' separators across platforms
+            lua::pushstring(L, p.generic_string().c_str());
+            lua::rawseti(L, -2, idx++);
+        }
+        return 1;
+    });
+    lua::setfield(L, -2, "files");
+
+    // os.isdir(path) -> bool
+    lua::pushcfunction(L, [](lua::State* L) -> int {
+        const char* p = lua::tostring(L, 1);
+        if (!p) { lua::pushboolean(L, 0); return 1; }
+        std::error_code ec;
+        lua::pushboolean(L, fs::is_directory(fs::path(p), ec) ? 1 : 0);
+        return 1;
+    });
+    lua::setfield(L, -2, "isdir");
+
+    lua::pop(L, 1);  // pop os table
 
     // os.cd and os.execv are no-ops in the build sandbox.
     // Git reset (clean + checkout) is handled by C++ in run_pkgindex_build()
@@ -341,7 +367,11 @@ bool run_pkgindex_build(const fs::path& repo_dir) {
     // Reset pkgs dir via git to ensure clean state before the build script
     // modifies files. Use git -C to avoid changing working directory.
     if (fs::exists(repo_dir / ".git")) {
+#if defined(_WIN32)
+        auto cmd = "git -C \"" + repo_dir.string() + "\" checkout -- pkgs/ 2>nul";
+#else
         auto cmd = "git -C \"" + repo_dir.string() + "\" checkout -- pkgs/ 2>/dev/null";
+#endif
         std::system(cmd.c_str());
     }
 

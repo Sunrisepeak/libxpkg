@@ -44,10 +44,13 @@ jobs:
         run: |
           xlings install
           xmake --version
+          gcc --version
+          g++ --version
+          cc --version
 
       - name: Build
         run: |
-          xmake f -m release -y -vv
+          xmake f -m release -y -vv -cD
           xmake -y -vv -j$(nproc)
 
       - name: Test

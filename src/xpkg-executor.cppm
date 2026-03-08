@@ -130,6 +130,105 @@ void register_os_funcs(lua::State* L) {
     });
     lua::setfield(L, -2, "cd");
 
+    // os.cp(src, dst) -> bool
+    lua::pushcfunction(L, [](lua::State* L) -> int {
+        const char* src = lua::tostring(L, 1);
+        const char* dst = lua::tostring(L, 2);
+        if (!src || !dst) { lua::pushboolean(L, 0); return 1; }
+        std::error_code ec;
+        fs::copy(fs::path(src), fs::path(dst),
+                 fs::copy_options::recursive | fs::copy_options::overwrite_existing, ec);
+        lua::pushboolean(L, ec ? 0 : 1);
+        return 1;
+    });
+    lua::setfield(L, -2, "cp");
+
+    // os.trymv(src, dst) -> bool  (rename, fallback to copy+remove)
+    lua::pushcfunction(L, [](lua::State* L) -> int {
+        const char* s = lua::tostring(L, 1);
+        const char* d = lua::tostring(L, 2);
+        if (!s || !d) { lua::pushboolean(L, 0); return 1; }
+        fs::path src(s), dst(d);
+        std::error_code ec;
+        // If dst is existing dir, move into it (unix mv semantics)
+        if (fs::is_directory(dst, ec)) dst /= src.filename();
+        fs::rename(src, dst, ec);
+        if (!ec) { lua::pushboolean(L, 1); return 1; }
+        // Cross-device: copy + remove
+        ec.clear();
+        fs::copy(src, dst, fs::copy_options::recursive | fs::copy_options::overwrite_existing, ec);
+        if (ec) { lua::pushboolean(L, 0); return 1; }
+        fs::remove_all(src, ec);
+        lua::pushboolean(L, 1);
+        return 1;
+    });
+    lua::setfield(L, -2, "trymv");
+    // Also set os.mv = os.trymv
+    lua::getfield(L, -1, "trymv");
+    lua::setfield(L, -2, "mv");
+
+    // os.tryrm(path) -> bool
+    lua::pushcfunction(L, [](lua::State* L) -> int {
+        const char* p = lua::tostring(L, 1);
+        if (!p) { lua::pushboolean(L, 0); return 1; }
+        std::error_code ec;
+        fs::remove_all(fs::path(p), ec);
+        lua::pushboolean(L, 1);
+        return 1;
+    });
+    lua::setfield(L, -2, "tryrm");
+
+    // os.mkdir(path) -> bool
+    lua::pushcfunction(L, [](lua::State* L) -> int {
+        const char* p = lua::tostring(L, 1);
+        if (!p) { lua::pushboolean(L, 0); return 1; }
+        std::error_code ec;
+        fs::create_directories(fs::path(p), ec);
+        lua::pushboolean(L, ec ? 0 : 1);
+        return 1;
+    });
+    lua::setfield(L, -2, "mkdir");
+
+    // os.isfile(path) -> bool
+    lua::pushcfunction(L, [](lua::State* L) -> int {
+        const char* p = lua::tostring(L, 1);
+        if (!p) { lua::pushboolean(L, 0); return 1; }
+        std::error_code ec;
+        lua::pushboolean(L, fs::is_regular_file(fs::path(p), ec) ? 1 : 0);
+        return 1;
+    });
+    lua::setfield(L, -2, "isfile");
+
+    // os.iorun(cmd) -> string  (capture stdout, discard stderr)
+    lua::pushcfunction(L, [](lua::State* L) -> int {
+        const char* cmd = lua::tostring(L, 1);
+        if (!cmd) { lua::pushstring(L, ""); return 1; }
+        // Build a temp path for capturing output
+        std::error_code ec;
+        auto tmp = fs::temp_directory_path(ec) / ("xpkg_iorun_" +
+            std::to_string(std::hash<std::string>{}(std::string(cmd) +
+                std::to_string(std::chrono::steady_clock::now().time_since_epoch().count()))));
+        std::string full(cmd);
+#ifdef _WIN32
+        full += " 2>nul > \"" + tmp.string() + "\"";
+#else
+        full += " 2>/dev/null > \"" + tmp.string() + "\"";
+#endif
+        std::system(full.c_str());
+        std::ifstream ifs(tmp);
+        std::string out;
+        if (ifs.good()) {
+            std::ostringstream ss;
+            ss << ifs.rdbuf();
+            out = ss.str();
+        }
+        ifs.close();
+        fs::remove(tmp, ec);
+        lua::pushstring(L, out.c_str());
+        return 1;
+    });
+    lua::setfield(L, -2, "iorun");
+
     lua::pop(L, 1); // pop os table
 }
 
@@ -188,7 +287,7 @@ bool load_stdlib(lua::State* L, std::string& err_out) {
         return false;
     }
 
-    // Override shell-based os.isdir/os.dirs with C++ std::filesystem implementations
+    // Override shell-based os.* with C++ std::filesystem implementations
     register_os_funcs(L);
 
     return true;

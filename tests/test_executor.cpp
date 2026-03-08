@@ -178,6 +178,138 @@ TEST(ExecutorTest, RunScriptFailsWithoutXpkgMain) {
     fs::remove(tmp);
 }
 
+// ---- os.* C++ override tests ----
+
+TEST(ExecutorTest, OsFuncs_Cp_CopiesDirectory) {
+    const fs::path temp = make_temp_dir("libxpkg-oscp-dir-");
+    const fs::path src = temp / "src_dir";
+    const fs::path dst = temp / "dst_dir";
+    fs::create_directories(src / "sub");
+    write_text(src / "a.txt", "hello");
+    write_text(src / "sub" / "b.txt", "world");
+
+    auto pkg = temp / "oscp.lua";
+    write_text(pkg, std::string(
+        "package = { name = \"oscp\", xpm = { linux = { [\"0.0.1\"] = {} } } }\n"
+        "function xpkg_main(s, d) return os.cp(s, d) end\n"));
+    auto exec = create_executor(pkg);
+    ASSERT_TRUE(exec.has_value()) << exec.error();
+    ExecutionContext ctx;
+    ctx.platform = "linux";
+    ctx.args = {src.string(), dst.string()};
+    auto r = exec->run_script(ctx);
+    EXPECT_TRUE(r.success) << r.error;
+    EXPECT_TRUE(fs::exists(dst / "a.txt"));
+    EXPECT_TRUE(fs::exists(dst / "sub" / "b.txt"));
+    fs::remove_all(temp);
+}
+
+TEST(ExecutorTest, OsFuncs_Cp_CopiesFile) {
+    const fs::path temp = make_temp_dir("libxpkg-oscp-file-");
+    const fs::path src = temp / "file.txt";
+    const fs::path dst = temp / "copy.txt";
+    write_text(src, "content");
+
+    auto pkg = temp / "oscp2.lua";
+    write_text(pkg, std::string(
+        "package = { name = \"oscp2\", xpm = { linux = { [\"0.0.1\"] = {} } } }\n"
+        "function xpkg_main(s, d) return os.cp(s, d) end\n"));
+    auto exec = create_executor(pkg);
+    ASSERT_TRUE(exec.has_value()) << exec.error();
+    ExecutionContext ctx;
+    ctx.platform = "linux";
+    ctx.args = {src.string(), dst.string()};
+    auto r = exec->run_script(ctx);
+    EXPECT_TRUE(r.success) << r.error;
+    EXPECT_TRUE(fs::is_regular_file(dst));
+    fs::remove_all(temp);
+}
+
+TEST(ExecutorTest, OsFuncs_Trymv_MovesDirectory) {
+    const fs::path temp = make_temp_dir("libxpkg-osmv-");
+    const fs::path src = temp / "move_src";
+    const fs::path dst = temp / "move_dst";
+    fs::create_directories(src);
+    write_text(src / "f.txt", "data");
+
+    auto pkg = temp / "osmv.lua";
+    write_text(pkg, std::string(
+        "package = { name = \"osmv\", xpm = { linux = { [\"0.0.1\"] = {} } } }\n"
+        "function xpkg_main(s, d) return os.trymv(s, d) end\n"));
+    auto exec = create_executor(pkg);
+    ASSERT_TRUE(exec.has_value()) << exec.error();
+    ExecutionContext ctx;
+    ctx.platform = "linux";
+    ctx.args = {src.string(), dst.string()};
+    auto r = exec->run_script(ctx);
+    EXPECT_TRUE(r.success) << r.error;
+    EXPECT_TRUE(fs::exists(dst / "f.txt"));
+    EXPECT_FALSE(fs::exists(src));
+    fs::remove_all(temp);
+}
+
+TEST(ExecutorTest, OsFuncs_Tryrm_RemovesDirectory) {
+    const fs::path temp = make_temp_dir("libxpkg-osrm-");
+    const fs::path target = temp / "to_remove";
+    fs::create_directories(target / "nested");
+    write_text(target / "nested" / "f.txt", "x");
+
+    auto pkg = temp / "osrm.lua";
+    write_text(pkg, std::string(
+        "package = { name = \"osrm\", xpm = { linux = { [\"0.0.1\"] = {} } } }\n"
+        "function xpkg_main(p) os.tryrm(p) end\n"));
+    auto exec = create_executor(pkg);
+    ASSERT_TRUE(exec.has_value()) << exec.error();
+    ExecutionContext ctx;
+    ctx.platform = "linux";
+    ctx.args = {target.string()};
+    auto r = exec->run_script(ctx);
+    EXPECT_TRUE(r.success) << r.error;
+    EXPECT_FALSE(fs::exists(target));
+    fs::remove_all(temp);
+}
+
+TEST(ExecutorTest, OsFuncs_Mkdir_CreatesNested) {
+    const fs::path temp = make_temp_dir("libxpkg-osmkdir-");
+    const fs::path nested = temp / "a" / "b" / "c";
+
+    auto pkg = temp / "osmkdir.lua";
+    write_text(pkg, std::string(
+        "package = { name = \"osmkdir\", xpm = { linux = { [\"0.0.1\"] = {} } } }\n"
+        "function xpkg_main(p) return os.mkdir(p) end\n"));
+    auto exec = create_executor(pkg);
+    ASSERT_TRUE(exec.has_value()) << exec.error();
+    ExecutionContext ctx;
+    ctx.platform = "linux";
+    ctx.args = {nested.string()};
+    auto r = exec->run_script(ctx);
+    EXPECT_TRUE(r.success) << r.error;
+    EXPECT_TRUE(fs::is_directory(nested));
+    fs::remove_all(temp);
+}
+
+TEST(ExecutorTest, OsFuncs_Isfile_DistinguishesFileAndDir) {
+    const fs::path temp = make_temp_dir("libxpkg-osisfile-");
+    const fs::path file = temp / "real.txt";
+    write_text(file, "hi");
+
+    auto pkg = temp / "osisfile.lua";
+    write_text(pkg, std::string(
+        "package = { name = \"osisfile\", xpm = { linux = { [\"0.0.1\"] = {} } } }\n"
+        "function xpkg_main(f, d)\n"
+        "    if not os.isfile(f) then error('file not detected') end\n"
+        "    if os.isfile(d) then error('dir detected as file') end\n"
+        "end\n"));
+    auto exec = create_executor(pkg);
+    ASSERT_TRUE(exec.has_value()) << exec.error();
+    ExecutionContext ctx;
+    ctx.platform = "linux";
+    ctx.args = {file.string(), temp.string()};
+    auto r = exec->run_script(ctx);
+    EXPECT_TRUE(r.success) << r.error;
+    fs::remove_all(temp);
+}
+
 TEST(ExecutorTest, ApplyElfpatchAuto_DisabledReturnsZeroCounts) {
     auto exec = create_executor(HELLO_PKG);
     ASSERT_TRUE(exec.has_value()) << (exec ? "" : exec.error());

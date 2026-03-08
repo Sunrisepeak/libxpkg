@@ -131,12 +131,18 @@ void register_os_funcs(lua::State* L) {
     lua::setfield(L, -2, "cd");
 
     // os.cp(src, dst) -> bool
+    // Mimics `cp -a`: when src is a dir and dst is an existing dir,
+    // copies src as a subdirectory of dst (i.e. dst/src_name/...).
     lua::pushcfunction(L, [](lua::State* L) -> int {
         const char* src = lua::tostring(L, 1);
         const char* dst = lua::tostring(L, 2);
         if (!src || !dst) { lua::pushboolean(L, 0); return 1; }
+        fs::path sp(src), dp(dst);
         std::error_code ec;
-        fs::copy(fs::path(src), fs::path(dst),
+        // cp -a semantics: dir into existing dir → dst/basename(src)/...
+        if (fs::is_directory(sp, ec) && fs::is_directory(dp, ec))
+            dp /= sp.filename();
+        fs::copy(sp, dp,
                  fs::copy_options::recursive | fs::copy_options::overwrite_existing, ec);
         lua::pushboolean(L, ec ? 0 : 1);
         return 1;

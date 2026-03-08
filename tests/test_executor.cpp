@@ -199,8 +199,34 @@ TEST(ExecutorTest, OsFuncs_Cp_CopiesDirectory) {
     ctx.args = {src.string(), dst.string()};
     auto r = exec->run_script(ctx);
     EXPECT_TRUE(r.success) << r.error;
+    // dst didn't exist, so src contents are copied directly into dst
     EXPECT_TRUE(fs::exists(dst / "a.txt"));
     EXPECT_TRUE(fs::exists(dst / "sub" / "b.txt"));
+    fs::remove_all(temp);
+}
+
+TEST(ExecutorTest, OsFuncs_Cp_CopiesDirIntoExistingDir) {
+    // cp -a semantics: copy dir into existing dir creates dst/src_name/...
+    const fs::path temp = make_temp_dir("libxpkg-oscp-into-");
+    const fs::path include = temp / "include";
+    const fs::path usr = temp / "usr";
+    fs::create_directories(include / "linux");
+    fs::create_directories(usr);
+    write_text(include / "linux" / "errno.h", "#define ERRNO_H");
+
+    auto pkg = temp / "oscp_into.lua";
+    write_text(pkg, std::string(
+        "package = { name = \"oscp_into\", xpm = { linux = { [\"0.0.1\"] = {} } } }\n"
+        "function xpkg_main(s, d) return os.cp(s, d) end\n"));
+    auto exec = create_executor(pkg);
+    ASSERT_TRUE(exec.has_value()) << exec.error();
+    ExecutionContext ctx;
+    ctx.platform = "linux";
+    ctx.args = {include.string(), usr.string()};
+    auto r = exec->run_script(ctx);
+    EXPECT_TRUE(r.success) << r.error;
+    // include copied INTO usr → usr/include/linux/errno.h
+    EXPECT_TRUE(fs::exists(usr / "include" / "linux" / "errno.h"));
     fs::remove_all(temp);
 }
 

@@ -1,6 +1,9 @@
 -- xim.libxpkg.xvm: version management integration (collects ops for C++ processing)
 local M = {}
-local _log_enabled = true
+
+local function _get_log()
+    return _LIBXPKG_MODULES and _LIBXPKG_MODULES["log"]
+end
 
 _XVM_OPS = _XVM_OPS or {}
 
@@ -17,16 +20,14 @@ function M.add(name, opt)
         binding  = opt.binding or "",
         envs     = opt.envs or nil,
     }
-    if _log_enabled then
-        io.write("[xim:xpkg]: xvm add " .. name .. " version=" .. entry.version .. "\n")
-    end
+    local log = _get_log()
+    if log then log.debug("xvm add %s version=%s", name, entry.version) end
     table.insert(_XVM_OPS, entry)
 end
 
 function M.remove(name, version)
-    if _log_enabled then
-        io.write("[xim:xpkg]: xvm remove " .. name .. " " .. (version or "") .. "\n")
-    end
+    local log = _get_log()
+    if log then log.debug("xvm remove %s %s", name, version or "") end
     table.insert(_XVM_OPS, {op = "remove", name = name, version = version or ""})
 end
 
@@ -131,10 +132,9 @@ function M.info(name, version)
     return info_table
 end
 
+-- Deprecated: use log.set_level() instead. Kept for backward compat.
 function M.log_tag(enable)
-    local old = _log_enabled
-    _log_enabled = enable
-    return old
+    return enable
 end
 
 --- Unified registration of programs, libraries, and headers

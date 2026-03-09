@@ -533,6 +533,17 @@ public:
         return result;
     }
 
+    // Set log level for Lua scripts: "debug", "info", "warn", "error", "silent"
+    void set_log_level(std::string_view level) {
+        std::string script = std::string("local log = _LIBXPKG_MODULES and _LIBXPKG_MODULES['log']; ")
+            + "if log and log.set_level then log.set_level('" + std::string(level) + "') end";
+        if (lua::L_loadstring(L_, script.c_str()) == lua::OK) {
+            lua::pcall(L_, 0, 0, 0);
+        } else {
+            lua::pop(L_, 1);
+        }
+    }
+
     std::vector<InstallRequest> install_requests() {
         std::vector<InstallRequest> reqs;
         lua::getglobal(L_, "_INSTALL_REQUESTS");

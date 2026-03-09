@@ -1,17 +1,22 @@
 -- xim.libxpkg.utils: utility functions
 local M = {}
 
+local function _get_log()
+    return _LIBXPKG_MODULES and _LIBXPKG_MODULES["log"]
+end
+
 function M.filepath_to_absolute(filepath)
     if path.is_absolute(filepath) then return filepath end
     return path.join(os.getenv("PWD") or ".", filepath)
 end
 
 function M.try_download_and_check(url, dir, sha256)
+    local log = _get_log()
     local filename = url:match("[^/]+$") or "download"
     local dest = path.join(dir, filename)
     local ret = os.execute(string.format('curl -fsSL -o "%s" "%s"', dest, url))
     if ret ~= 0 and ret ~= true then
-        io.write("[xim:xpkg]: download failed: " .. url .. "\n")
+        if log then log.error("download failed: %s", url) end
         return false
     end
     if sha256 then
@@ -20,7 +25,7 @@ function M.try_download_and_check(url, dir, sha256)
         if f then f:close() end
         local actual = out:match("^(%x+)")
         if actual ~= sha256 then
-            io.write("[xim:xpkg]: sha256 mismatch for " .. dest .. "\n")
+            if log then log.error("sha256 mismatch for %s", dest) end
             return false
         end
     end

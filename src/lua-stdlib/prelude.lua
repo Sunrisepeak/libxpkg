@@ -16,8 +16,8 @@ function import(mod_path)
         return _LIBXPKG_MODULES[name]
     end
     -- Stub for unknown imports (platform, base.runtime, etc.)
-    io.write("[libxpkg] WARNING: unknown module '" .. mod_path .. "', returning stub\n")
-    io.flush()
+    local log = _LIBXPKG_MODULES and _LIBXPKG_MODULES["log"]
+    if log then log.debug("unknown module '%s', returning stub", mod_path) end
     local short = mod_path:match("[^.]+$") or mod_path
     local function make_proxy()
         return setmetatable({}, {

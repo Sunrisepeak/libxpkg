@@ -13,12 +13,20 @@ local function _shell_quote(s)
     return "'" .. s:gsub("'", "'\\''") .. "'"
 end
 
+local function _get_log()
+    return _LIBXPKG_MODULES and _LIBXPKG_MODULES["log"]
+end
+
 local function _warn(msg)
-    io.write("[xim:xpkg]: WARNING: " .. msg .. "\n")
+    local log = _get_log()
+    if log then log.warn("elfpatch: %s", msg)
+    else io.write("[xim:xpkg]: WARNING: " .. msg .. "\n") end
 end
 
 local function _info(msg)
-    io.write("[xim:xpkg]: elfpatch: " .. msg .. "\n")
+    local log = _get_log()
+    if log then log.debug("elfpatch: %s", msg)
+    else io.write("[xim:xpkg]: elfpatch: " .. msg .. "\n") end
 end
 
 local function _exec_ok(cmd)

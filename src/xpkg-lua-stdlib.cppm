@@ -24,8 +24,8 @@ function import(mod_path)
         return _LIBXPKG_MODULES[name]
     end
     -- Stub for unknown imports (platform, base.runtime, etc.)
-    io.write("[libxpkg] WARNING: unknown module '" .. mod_path .. "', returning stub\n")
-    io.flush()
+    local log = _LIBXPKG_MODULES and _LIBXPKG_MODULES["log"]
+    if log then log.debug("unknown module '%s', returning stub", mod_path) end
     local short = mod_path:match("[^.]+$") or mod_path
     local function make_proxy()
         return setmetatable({}, {
@@ -316,6 +316,14 @@ local M = {}
 
 local PREFIX = "[xim:xpkg]: "
 
+-- Log levels: 0=debug, 1=info, 2=warn, 3=error, 4=silent
+local LEVEL_DEBUG = 0
+local LEVEL_INFO  = 1
+local LEVEL_WARN  = 2
+local LEVEL_ERROR = 3
+
+local _level = LEVEL_INFO  -- default: show info and above
+
 local function _log(text, ...)
     if not text then return end
     local ok, msg = pcall(string.format, text, ...)
@@ -325,10 +333,35 @@ local function _log(text, ...)
     io.flush()
 end
 
-function M.info(text, ...)  _log(text, ...) end
-function M.debug(text, ...) _log(text, ...) end
-function M.warn(text, ...)  _log("[WARN] " .. (text or ""), ...) end
-function M.error(text, ...) _log("[ERROR] " .. (text or ""), ...) end
+function M.debug(text, ...)
+    if _level <= LEVEL_DEBUG then _log(text, ...) end
+end
+
+function M.info(text, ...)
+    if _level <= LEVEL_INFO then _log(text, ...) end
+end
+
+function M.warn(text, ...)
+    if _level <= LEVEL_WARN then _log("[WARN] " .. (text or ""), ...) end
+end
+
+function M.error(text, ...)
+    if _level <= LEVEL_ERROR then _log("[ERROR] " .. (text or ""), ...) end
+end
+
+-- Set log level: "debug", "info", "warn", "error", "silent"
+function M.set_level(level)
+    if level == "debug" or level == 0 then _level = LEVEL_DEBUG
+    elseif level == "info" or level == 1 then _level = LEVEL_INFO
+    elseif level == "warn" or level == 2 then _level = LEVEL_WARN
+    elseif level == "error" or level == 3 then _level = LEVEL_ERROR
+    elseif level == "silent" or level == 4 then _level = 4
+    end
+end
+
+function M.get_level()
+    return _level
+end
 
 return M
 
@@ -337,6 +370,10 @@ return M
 inline constexpr std::string_view pkginfo_lua = R"__LUA__(
 -- xim.libxpkg.pkginfo: package info API reading from _RUNTIME global
 local M = {}
+
+local function _get_log()
+    return _LIBXPKG_MODULES and _LIBXPKG_MODULES["log"]
+end
 
 function M.name()         return _RUNTIME and _RUNTIME.pkg_name or nil end
 function M.version()      return _RUNTIME and _RUNTIME.version or nil end
@@ -385,53 +422,54 @@ local function _scan_dir(base, ns, bare, dep_version)
 end
 
 local function _resolve_dep_via_scan(dep_name, dep_version)
+    local log = _get_log()
     local ns, bare = _parse_namespace(dep_name)
-    io.write(string.format("[pkginfo:debug] scan dep=%s ns=%s bare=%s ver=%s\n",
-        dep_name, tostring(ns), bare, tostring(dep_version)))
+    if log then log.debug("scan dep=%s ns=%s bare=%s ver=%s",
+        dep_name, tostring(ns), bare, tostring(dep_version)) end
     -- 1. Search xpkg_dir (lua package files directory)
     local xpkg_dir = _RUNTIME and _RUNTIME.xpkg_dir
-    io.write(string.format("[pkginfo:debug] step1 xpkg_dir=%s\n", tostring(xpkg_dir)))
+    if log then log.debug("step1 xpkg_dir=%s", tostring(xpkg_dir)) end
     local result = _scan_dir(xpkg_dir, ns, bare, dep_version)
-    if result then io.write("[pkginfo:debug] found via step1\n"); return result end
+    if result then if log then log.debug("found via step1") end; return result end
     -- 2. Search xpkgs install root (install_dir's grandparent)
     if _RUNTIME and _RUNTIME.install_dir then
         local xpkgs_root = path.directory(path.directory(_RUNTIME.install_dir))
-        io.write(string.format("[pkginfo:debug] step2 xpkgs_root=%s\n", tostring(xpkgs_root)))
+        if log then log.debug("step2 xpkgs_root=%s", tostring(xpkgs_root)) end
         result = _scan_dir(xpkgs_root, ns, bare, dep_version)
-        if result then io.write("[pkginfo:debug] found via step2\n"); return result end
+        if result then if log then log.debug("found via step2") end; return result end
     end
     -- 3. Search project xpkgs (handles global-pkg depending on project-local pkg)
     local proj_data = _RUNTIME and _RUNTIME.project_data_dir
-    io.write(string.format("[pkginfo:debug] step3 project_data_dir=%s\n", tostring(proj_data)))
+    if log then log.debug("step3 project_data_dir=%s", tostring(proj_data)) end
     if proj_data and proj_data ~= "" then
         local proj_xpkgs = path.join(proj_data, "xpkgs")
-        io.write(string.format("[pkginfo:debug] step3 proj_xpkgs=%s exists=%s\n",
-            proj_xpkgs, tostring(os.isdir(proj_xpkgs))))
+        if log then log.debug("step3 proj_xpkgs=%s exists=%s",
+            proj_xpkgs, tostring(os.isdir(proj_xpkgs))) end
         result = _scan_dir(proj_xpkgs, ns, bare, dep_version)
-        if result then io.write("[pkginfo:debug] found via step3\n"); return result end
+        if result then if log then log.debug("found via step3") end; return result end
     end
-    io.write("[pkginfo:debug] scan: not found\n")
+    if log then log.debug("scan: not found") end
     return nil
 end
 
 -- Try xvm registry: for "ns:name", try "ns-name" first, then bare "name"
 local function _resolve_dep_via_xvm(dep_name, dep_version)
+    local log = _get_log()
     local ok_xvm, xvm_mod = pcall(require, "xim.libxpkg.xvm")
     if not ok_xvm or not xvm_mod then
         xvm_mod = _LIBXPKG_MODULES and _LIBXPKG_MODULES["xvm"]
     end
     if not xvm_mod then
-        io.write("[pkginfo:debug] xvm: module not available\n")
+        if log then log.debug("xvm: module not available") end
         return nil
     end
     local ns, bare = _parse_namespace(dep_name)
     local candidates = ns and {ns .. "-" .. bare, bare} or {bare}
-    io.write(string.format("[pkginfo:debug] xvm candidates: %s\n",
-        table.concat(candidates, ", ")))
+    if log then log.debug("xvm candidates: %s", table.concat(candidates, ", ")) end
     for _, xvm_name in ipairs(candidates) do
         local info = xvm_mod.info(xvm_name, dep_version)
-        io.write(string.format("[pkginfo:debug] xvm.info(%s) = %s\n",
-            xvm_name, info and ("SPath=" .. tostring(info["SPath"])) or "nil"))
+        if log then log.debug("xvm.info(%s) = %s",
+            xvm_name, info and ("SPath=" .. tostring(info["SPath"])) or "nil") end
         if info and info["SPath"] and info["SPath"] ~= "" then
             local spath = info["SPath"]
             local pver = (info["Version"] or dep_version or ""):gsub("([%(%)%.%%%+%-%*%?%[%]%^%$])", "%%%1")
@@ -443,7 +481,7 @@ local function _resolve_dep_via_xvm(dep_name, dep_version)
             end
         end
     end
-    io.write("[pkginfo:debug] xvm: not found\n")
+    if log then log.debug("xvm: not found") end
     return nil
 end
 
@@ -459,8 +497,9 @@ function M.install_dir(pkgname, pkgversion)
     end
     local dir = M.dep_install_dir(pkgname, pkgversion)
     if dir then return dir end
-    io.write(string.format("[xim:xpkg]: cannot get install dir for %s@%s\n",
-        tostring(pkgname), tostring(pkgversion or "latest")))
+    local log = _get_log()
+    if log then log.error("cannot get install dir for %s@%s",
+        tostring(pkgname), tostring(pkgversion or "latest")) end
     return nil
 end
 
@@ -542,7 +581,10 @@ return M
 inline constexpr std::string_view xvm_lua = R"__LUA__(
 -- xim.libxpkg.xvm: version management integration (collects ops for C++ processing)
 local M = {}
-local _log_enabled = true
+
+local function _get_log()
+    return _LIBXPKG_MODULES and _LIBXPKG_MODULES["log"]
+end
 
 _XVM_OPS = _XVM_OPS or {}
 
@@ -559,16 +601,14 @@ function M.add(name, opt)
         binding  = opt.binding or "",
         envs     = opt.envs or nil,
     }
-    if _log_enabled then
-        io.write("[xim:xpkg]: xvm add " .. name .. " version=" .. entry.version .. "\n")
-    end
+    local log = _get_log()
+    if log then log.debug("xvm add %s version=%s", name, entry.version) end
     table.insert(_XVM_OPS, entry)
 end
 
 function M.remove(name, version)
-    if _log_enabled then
-        io.write("[xim:xpkg]: xvm remove " .. name .. " " .. (version or "") .. "\n")
-    end
+    local log = _get_log()
+    if log then log.debug("xvm remove %s %s", name, version or "") end
     table.insert(_XVM_OPS, {op = "remove", name = name, version = version or ""})
 end
 
@@ -673,10 +713,9 @@ function M.info(name, version)
     return info_table
 end
 
+-- Deprecated: use log.set_level() instead. Kept for backward compat.
 function M.log_tag(enable)
-    local old = _log_enabled
-    _log_enabled = enable
-    return old
+    return enable
 end
 
 --- Unified registration of programs, libraries, and headers
@@ -759,17 +798,22 @@ inline constexpr std::string_view utils_lua = R"__LUA__(
 -- xim.libxpkg.utils: utility functions
 local M = {}
 
+local function _get_log()
+    return _LIBXPKG_MODULES and _LIBXPKG_MODULES["log"]
+end
+
 function M.filepath_to_absolute(filepath)
     if path.is_absolute(filepath) then return filepath end
     return path.join(os.getenv("PWD") or ".", filepath)
 end
 
 function M.try_download_and_check(url, dir, sha256)
+    local log = _get_log()
     local filename = url:match("[^/]+$") or "download"
     local dest = path.join(dir, filename)
     local ret = os.execute(string.format('curl -fsSL -o "%s" "%s"', dest, url))
     if ret ~= 0 and ret ~= true then
-        io.write("[xim:xpkg]: download failed: " .. url .. "\n")
+        if log then log.error("download failed: %s", url) end
         return false
     end
     if sha256 then
@@ -778,7 +822,7 @@ function M.try_download_and_check(url, dir, sha256)
         if f then f:close() end
         local actual = out:match("^(%x+)")
         if actual ~= sha256 then
-            io.write("[xim:xpkg]: sha256 mismatch for " .. dest .. "\n")
+            if log then log.error("sha256 mismatch for %s", dest) end
             return false
         end
     end
@@ -819,18 +863,22 @@ return M
 inline constexpr std::string_view pkgmanager_lua = R"__LUA__(
 local M = {}
 
+local function _get_log()
+    return _LIBXPKG_MODULES and _LIBXPKG_MODULES["log"]
+end
+
 function M.install(target)
     if not target or target == "" then return end
-    io.write("[xim:xpkg]: pkgmanager.install(" .. tostring(target) .. ")\n")
-    io.flush()
+    local log = _get_log()
+    if log then log.debug("pkgmanager.install(%s)", tostring(target)) end
     if not _INSTALL_REQUESTS then _INSTALL_REQUESTS = {} end
     table.insert(_INSTALL_REQUESTS, {op = "install", target = tostring(target)})
 end
 
 function M.remove(target)
     if not target or target == "" then return end
-    io.write("[xim:xpkg]: pkgmanager.remove(" .. tostring(target) .. ")\n")
-    io.flush()
+    local log = _get_log()
+    if log then log.debug("pkgmanager.remove(%s)", tostring(target)) end
     if not _INSTALL_REQUESTS then _INSTALL_REQUESTS = {} end
     table.insert(_INSTALL_REQUESTS, {op = "remove", target = tostring(target)})
 end
@@ -859,12 +907,20 @@ local function _shell_quote(s)
     return "'" .. s:gsub("'", "'\\''") .. "'"
 end
 
+local function _get_log()
+    return _LIBXPKG_MODULES and _LIBXPKG_MODULES["log"]
+end
+
 local function _warn(msg)
-    io.write("[xim:xpkg]: WARNING: " .. msg .. "\n")
+    local log = _get_log()
+    if log then log.warn("elfpatch: %s", msg)
+    else io.write("[xim:xpkg]: WARNING: " .. msg .. "\n") end
 end
 
 local function _info(msg)
-    io.write("[xim:xpkg]: elfpatch: " .. msg .. "\n")
+    local log = _get_log()
+    if log then log.debug("elfpatch: %s", msg)
+    else io.write("[xim:xpkg]: elfpatch: " .. msg .. "\n") end
 end
 
 local function _exec_ok(cmd)

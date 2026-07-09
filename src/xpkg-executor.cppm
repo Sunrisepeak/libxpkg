@@ -17,6 +17,7 @@ export namespace mcpplibs::xpkg {
 // surfaced — additional `exports.*` capabilities (data, build) will be
 // injected via separate _RUNTIME tables when those land.
 struct DepExport {
+    std::string install_dir;                  // effective materialized store dir
     std::string loader;                       // absolute path or empty
     std::vector<std::string> libdirs;         // absolute paths (already joined)
     std::string abi;                          // e.g. "linux-x86_64-glibc"
@@ -588,6 +589,7 @@ void inject_context(lua::State* L, const mcpplibs::xpkg::ExecutionContext& ctx) 
     lua::newtable(L);
     for (auto& [dep_spec, e] : ctx.deps_exports) {
         lua::newtable(L);
+        set_string_field(L, "install_dir", e.install_dir);
         set_string_field(L, "loader", e.loader);
         set_string_field(L, "abi",    e.abi);
         push_string_array(e.libdirs, "libdirs");

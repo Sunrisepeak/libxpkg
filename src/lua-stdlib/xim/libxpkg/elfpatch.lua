@@ -612,6 +612,15 @@ function M.closure_lib_paths(opt)
         local declared = deps_exports[dep_spec]
         if declared and declared.libdirs and #declared.libdirs > 0 then
             for _, d in ipairs(declared.libdirs) do _push(d) end
+        elseif declared and declared.install_dir and declared.install_dir ~= "" then
+            -- xlings injected the EFFECTIVE materialized store for this dep
+            -- (additive-aware). Prefer it over the pkginfo.dep_install_dir
+            -- scan, which resolves the dep's NOMINAL scope and can point at
+            -- a store where the payload was never materialized.
+            for _, sub in ipairs({"lib64", "lib"}) do
+                local libdir = path.join(declared.install_dir, sub)
+                if os.isdir(libdir) then _push(libdir); break end
+            end
         else
             local dep_name    = dep_spec:gsub("@.*", ""):gsub("^.+:", "")
             local dep_version = dep_spec:find("@", 1, true) and dep_spec:match("@(.+)") or nil

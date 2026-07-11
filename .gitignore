@@ -1,6 +1,8 @@
 # xmake
 .xmake
 build
+target/
+compile_commands.json
 
 # xlings
 .xlings

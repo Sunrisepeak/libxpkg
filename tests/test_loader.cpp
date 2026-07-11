@@ -278,6 +278,24 @@ TEST(LoaderTest, SourceDefaultsAreParsedAsMetadataNotVersions) {
     EXPECT_FALSE(result->xpm.entries.contains("source"));
 }
 
+TEST(LoaderTest, PlatformContextEvaluatesLegacyHostConditionals) {
+    auto linux = load_package(
+        PKGINDEX / "pkgs/v/v2platform_context.lua",
+        LoaderContext{.platform = "linux", .arch = "x86_64"});
+    ASSERT_TRUE(linux.has_value()) << linux.error();
+    EXPECT_EQ(
+        linux->xpm.entries.at("linux").at("1.0.0").url,
+        "https://example.test/linux-x86_64.tar.gz");
+
+    auto macos = load_package(
+        PKGINDEX / "pkgs/v/v2platform_context.lua",
+        LoaderContext{.platform = "macosx", .arch = "aarch64"});
+    ASSERT_TRUE(macos.has_value()) << macos.error();
+    EXPECT_EQ(
+        macos->xpm.entries.at("macosx").at("1.0.0").url,
+        "https://example.test/macosx-aarch64.tar.gz");
+}
+
 TEST(CompatTest, XlingsResSourceFollowsRefAndSelectsArchHash) {
     auto package = load_package(PKGINDEX / "pkgs/v/v2source_res.lua");
     ASSERT_TRUE(package.has_value()) << package.error();

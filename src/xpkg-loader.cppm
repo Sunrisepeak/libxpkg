@@ -174,6 +174,11 @@ PlatformMatrix parse_xpm(lua::State* L, int pkg_idx) {
 
     // Iterate platforms
     int xpm_idx = lua::gettop(L);
+
+    // `source` is additive metadata: it supplies a default resource origin
+    // without changing the existing platform/version matrix.
+    xpm.source = get_str(L, xpm_idx, "source");
+
     lua::pushnil(L);
     while (lua::next(L, xpm_idx)) {
         // key = platform name (at -2), value = version table (at -1)
@@ -181,8 +186,13 @@ PlatformMatrix parse_xpm(lua::State* L, int pkg_idx) {
         if (lua::type(L, -2) == lua::TSTRING)
             platform = lua::tostring(L, -2);
 
-        if (!platform.empty() && lua::type(L, -1) == lua::TTABLE) {
+        if (!platform.empty() && platform != "source"
+                && lua::type(L, -1) == lua::TTABLE) {
             int plat_idx = lua::gettop(L);
+
+            auto platform_source = get_str(L, plat_idx, "source");
+            if (!platform_source.empty())
+                xpm.platform_sources[platform] = std::move(platform_source);
 
             // Parse deps. Two accepted shapes:
             //
@@ -305,7 +315,8 @@ PlatformMatrix parse_xpm(lua::State* L, int pkg_idx) {
                 // (parsed above) that would otherwise leak in as a bogus
                 // version entry; `deps`/`inherits` likewise.
                 if (!version.empty() && version != "deps"
-                        && version != "inherits" && version != "exports") {
+                        && version != "inherits" && version != "exports"
+                        && version != "source") {
                     PlatformResource res;
                     if (lua::type(L, -1) == lua::TTABLE) {
                         int res_idx = lua::gettop(L);

@@ -76,6 +76,11 @@ struct ExportsBlock {
 };
 
 struct PlatformMatrix {
+    // Optional resource defaults. `source` applies to every platform while a
+    // platform-specific value overrides it. Values are either "xlings-res"
+    // or a URL template; version entries keep the existing model unchanged.
+    std::string source;
+    std::unordered_map<std::string, std::string> platform_sources;
     // platform -> version -> resource
     std::unordered_map<std::string,
         std::unordered_map<std::string, PlatformResource>> entries;

@@ -278,6 +278,24 @@ TEST(LoaderTest, SourceDefaultsAreParsedAsMetadataNotVersions) {
     EXPECT_FALSE(result->xpm.entries.contains("source"));
 }
 
+TEST(LoaderTest, PlatformContextEvaluatesLegacyHostConditionals) {
+    auto linux = load_package(
+        PKGINDEX / "pkgs/v/v2platform_context.lua",
+        LoaderContext{.platform = "linux", .arch = "x86_64"});
+    ASSERT_TRUE(linux.has_value()) << linux.error();
+    EXPECT_EQ(
+        linux->xpm.entries.at("linux").at("1.0.0").url,
+        "https://example.test/linux-x86_64.tar.gz");
+
+    auto macos = load_package(
+        PKGINDEX / "pkgs/v/v2platform_context.lua",
+        LoaderContext{.platform = "macosx", .arch = "aarch64"});
+    ASSERT_TRUE(macos.has_value()) << macos.error();
+    EXPECT_EQ(
+        macos->xpm.entries.at("macosx").at("1.0.0").url,
+        "https://example.test/macosx-aarch64.tar.gz");
+}
+
 TEST(CompatTest, XlingsResSourceFollowsRefAndSelectsArchHash) {
     auto package = load_package(PKGINDEX / "pkgs/v/v2source_res.lua");
     ASSERT_TRUE(package.has_value()) << package.error();
@@ -413,4 +431,35 @@ TEST(CompatTest, RefCyclesAreRejected) {
     });
     ASSERT_FALSE(resolved.has_value());
     EXPECT_NE(resolved.error().find("cycle"), std::string::npos);
+}
+
+TEST(CompatTest, MissingPerArchResourceFailsClosed) {
+    PlatformMatrix matrix;
+    matrix.source = "https://fallback.test/${arch}.tar.gz";
+    matrix.entries["linux"]["1.0.0"].archs["x86_64"] = {
+        .url = "https://example.test/x86_64.tar.gz",
+        .sha256 = "x86-hash",
+    };
+    auto resolved = resolve_resource(matrix, {
+        .name = "tool",
+        .version = "1.0.0",
+        .platform = "linux",
+        .arch = "aarch64",
+    });
+    ASSERT_FALSE(resolved.has_value());
+    EXPECT_NE(resolved.error().find("no resource for arch"), std::string::npos);
+}
+
+TEST(CompatTest, MissingPerArchChecksumFailsClosed) {
+    PlatformMatrix matrix;
+    matrix.source = "xlings-res";
+    matrix.entries["linux"]["1.0.0"].sha256_by_arch["x86_64"] = "x86-hash";
+    auto resolved = resolve_resource(matrix, {
+        .name = "tool",
+        .version = "1.0.0",
+        .platform = "linux",
+        .arch = "aarch64",
+    });
+    ASSERT_FALSE(resolved.has_value());
+    EXPECT_NE(resolved.error().find("no checksum for arch"), std::string::npos);
 }

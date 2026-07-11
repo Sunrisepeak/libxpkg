@@ -14,7 +14,14 @@ namespace mcpplibs::xpkg::loader_detail {
 // globals. This gives the loader a self-contained pure Lua 5.4 environment
 // that does not depend on any xmake runtime. Stubs ensure legacy or
 // third-party packages can still be loaded without crashing.
-void register_loader_sandbox(lua::State* L) {
+void register_loader_sandbox(
+    lua::State* L,
+    std::string_view platform,
+    std::string_view arch) {
+    lua::pushstring(L, std::string(platform).c_str());
+    lua::setglobal(L, "__xpkg_platform__");
+    lua::pushstring(L, std::string(arch).c_str());
+    lua::setglobal(L, "__xpkg_arch__");
     lua::L_dostring(L,
         // no-op import: returns a deep proxy and sets it as a global
         // (matches xmake behavior where import("platform") sets _G.platform)
@@ -43,11 +50,25 @@ void register_loader_sandbox(lua::State* L) {
         "end\n"
 
         // non-standard global stubs
-        "function is_host() return false end\n"
+        "function is_host(...) "
+        "  for i = 1, select('#', ...) do "
+        "    if select(i, ...) == __xpkg_platform__ then return true end "
+        "  end "
+        "  return false "
+        "end\n"
+        "function is_arch(...) "
+        "  for i = 1, select('#', ...) do "
+        "    if select(i, ...) == __xpkg_arch__ then return true end "
+        "  end "
+        "  return false "
+        "end\n"
+        "is_plat = is_host\n"
+        "_RUNTIME = { platform = __xpkg_platform__, arch = __xpkg_arch__ }\n"
         "format = string.format\n"
 
         // os extensions (safe defaults)
-        "os.host      = os.host or function() return 'unknown' end\n"
+        "os.host      = function() return __xpkg_platform__ ~= '' and __xpkg_platform__ or 'unknown' end\n"
+        "os.arch      = function() return __xpkg_arch__ ~= '' and __xpkg_arch__ or 'unknown' end\n"
         "os.isfile    = os.isfile or function() return false end\n"
         "os.isdir     = os.isdir or function() return false end\n"
         "os.scriptdir = os.scriptdir or function() return '.' end\n"
@@ -580,8 +601,13 @@ bool run_pkgindex_build(const fs::path& repo_dir) {
 
 export namespace mcpplibs::xpkg {
 
+struct LoaderContext {
+    std::string platform;
+    std::string arch;
+};
+
 std::expected<Package, std::string>
-load_package(const fs::path& pkg_path) {
+load_package(const fs::path& pkg_path, const LoaderContext& context) {
     if (!fs::exists(pkg_path))
         return std::unexpected("file not found: " + pkg_path.string());
 
@@ -590,7 +616,8 @@ load_package(const fs::path& pkg_path) {
     lua::L_openlibs(L);
 
     // Register loader sandbox (pure Lua 5.4, no xmake dependency)
-    loader_detail::register_loader_sandbox(L);
+    loader_detail::register_loader_sandbox(
+        L, context.platform, normalize_arch(context.arch));
 
     if (lua::L_dofile(L, pkg_path.string().c_str()) != lua::OK) {
         std::string err = lua::tostring(L, -1);
@@ -629,6 +656,11 @@ load_package(const fs::path& pkg_path) {
 
     lua::close(L);
     return p;
+}
+
+std::expected<Package, std::string>
+load_package(const fs::path& pkg_path) {
+    return load_package(pkg_path, {});
 }
 
 std::expected<PackageIndex, std::string>

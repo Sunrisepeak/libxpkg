@@ -100,6 +100,15 @@ std::expected<ResolvedResource, std::string> resolve_resource(
 
     const auto arch = normalize_arch(context.arch);
     const auto arch_it = resource->archs.find(arch);
+    if (!resource->archs.empty() && arch_it == resource->archs.end())
+        return std::unexpected(
+            "no resource for arch '" + arch + "' in version "
+            + resolved_version);
+    if (!resource->sha256_by_arch.empty()
+            && !resource->sha256_by_arch.contains(arch))
+        return std::unexpected(
+            "no checksum for arch '" + arch + "' in version "
+            + resolved_version);
     const ArchResource* arch_resource =
         arch_it == resource->archs.end() ? nullptr : &arch_it->second;
 

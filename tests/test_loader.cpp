@@ -432,3 +432,34 @@ TEST(CompatTest, RefCyclesAreRejected) {
     ASSERT_FALSE(resolved.has_value());
     EXPECT_NE(resolved.error().find("cycle"), std::string::npos);
 }
+
+TEST(CompatTest, MissingPerArchResourceFailsClosed) {
+    PlatformMatrix matrix;
+    matrix.source = "https://fallback.test/${arch}.tar.gz";
+    matrix.entries["linux"]["1.0.0"].archs["x86_64"] = {
+        .url = "https://example.test/x86_64.tar.gz",
+        .sha256 = "x86-hash",
+    };
+    auto resolved = resolve_resource(matrix, {
+        .name = "tool",
+        .version = "1.0.0",
+        .platform = "linux",
+        .arch = "aarch64",
+    });
+    ASSERT_FALSE(resolved.has_value());
+    EXPECT_NE(resolved.error().find("no resource for arch"), std::string::npos);
+}
+
+TEST(CompatTest, MissingPerArchChecksumFailsClosed) {
+    PlatformMatrix matrix;
+    matrix.source = "xlings-res";
+    matrix.entries["linux"]["1.0.0"].sha256_by_arch["x86_64"] = "x86-hash";
+    auto resolved = resolve_resource(matrix, {
+        .name = "tool",
+        .version = "1.0.0",
+        .platform = "linux",
+        .arch = "aarch64",
+    });
+    ASSERT_FALSE(resolved.has_value());
+    EXPECT_NE(resolved.error().find("no checksum for arch"), std::string::npos);
+}

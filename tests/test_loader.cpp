@@ -64,6 +64,17 @@ TEST(LoaderTest, LoadPackage_HasLinuxPlatform) {
     EXPECT_GT(result->xpm.entries.count("linux"), 0u);
 }
 
+TEST(LoaderTest, LoadPackage_SourceMapPreservesGlobalAndRegionalMirrors) {
+    auto result = load_package(PKGINDEX / "pkgs/s/source-map.lua");
+    ASSERT_TRUE(result.has_value()) << result.error();
+    EXPECT_EQ(result->xpm.source,
+              "https://github.com/example/tool/releases/download/v${version}/tool-${arch_alias}.tar.gz");
+    ASSERT_EQ(result->xpm.source_mirrors.size(), 2u);
+    EXPECT_EQ(result->xpm.source_mirrors.at("GLOBAL"), result->xpm.source);
+    EXPECT_EQ(result->xpm.source_mirrors.at("CN"),
+              "https://gitcode.com/xlings-res/tool/releases/download/${version}/tool-${arch_alias}.tar.gz");
+}
+
 TEST(LoaderTest, BuildIndex_ReturnsEntries) {
     auto result = build_index(PKGINDEX);
     ASSERT_TRUE(result.has_value()) << result.error();
@@ -417,6 +428,30 @@ TEST(CompatTest, TemplateMirrorsAreExpandedAndPreserved) {
     ASSERT_TRUE(resolved.has_value()) << resolved.error();
     EXPECT_EQ(resolved->url, "https://origin.test/tool-amd64.tar.xz");
     EXPECT_EQ(resolved->mirrors.at("CN"), "https://mirror.test/2.0.0/amd64");
+}
+
+TEST(CompatTest, SourceMapUsesGlobalAsPrimaryAndPreservesCnFallback) {
+    PlatformMatrix matrix;
+    matrix.source = "https://github.com/example/tool/${version}/tool-${arch_alias}.tar.gz";
+    matrix.source_mirrors = {
+        {"GLOBAL", matrix.source},
+        {"CN", "https://gitcode.com/xlings-res/tool/${version}/tool-${arch_alias}.tar.gz"},
+    };
+    matrix.entries["linux"]["1.0.0"].sha256 = "same-bytes";
+    matrix.entries["linux"]["1.0.0"].arch_alias["x86_64"] = "amd64";
+
+    auto resolved = resolve_resource(matrix, {
+        .name = "tool",
+        .version = "1.0.0",
+        .platform = "linux",
+        .arch = "x86_64",
+    });
+    ASSERT_TRUE(resolved.has_value()) << resolved.error();
+    EXPECT_EQ(resolved->url,
+              "https://github.com/example/tool/1.0.0/tool-amd64.tar.gz");
+    EXPECT_EQ(resolved->mirrors.at("GLOBAL"), resolved->url);
+    EXPECT_EQ(resolved->mirrors.at("CN"),
+              "https://gitcode.com/xlings-res/tool/1.0.0/tool-amd64.tar.gz");
 }
 
 TEST(CompatTest, RefCyclesAreRejected) {

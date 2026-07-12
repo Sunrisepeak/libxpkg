@@ -199,6 +199,14 @@ PlatformMatrix parse_xpm(lua::State* L, int pkg_idx) {
     // `source` is additive metadata: it supplies a default resource origin
     // without changing the existing platform/version matrix.
     xpm.source = get_str(L, xpm_idx, "source");
+    if (xpm.source.empty()) {
+        xpm.source_mirrors = get_str_map(L, xpm_idx, "source");
+        if (auto it = xpm.source_mirrors.find("GLOBAL");
+                it != xpm.source_mirrors.end())
+            xpm.source = it->second;
+        else if (!xpm.source_mirrors.empty())
+            xpm.source = xpm.source_mirrors.begin()->second;
+    }
 
     lua::pushnil(L);
     while (lua::next(L, xpm_idx)) {
@@ -212,8 +220,18 @@ PlatformMatrix parse_xpm(lua::State* L, int pkg_idx) {
             int plat_idx = lua::gettop(L);
 
             auto platform_source = get_str(L, plat_idx, "source");
-            if (!platform_source.empty())
+            if (!platform_source.empty()) {
                 xpm.platform_sources[platform] = std::move(platform_source);
+            } else {
+                auto mirrors = get_str_map(L, plat_idx, "source");
+                if (!mirrors.empty()) {
+                    if (auto it = mirrors.find("GLOBAL"); it != mirrors.end())
+                        xpm.platform_sources[platform] = it->second;
+                    else
+                        xpm.platform_sources[platform] = mirrors.begin()->second;
+                    xpm.platform_source_mirrors[platform] = std::move(mirrors);
+                }
+            }
 
             // Parse deps. Two accepted shapes:
             //

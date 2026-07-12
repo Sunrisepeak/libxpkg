@@ -79,8 +79,13 @@ struct PlatformMatrix {
     // Optional resource defaults. `source` applies to every platform while a
     // platform-specific value overrides it. Values are either "xlings-res"
     // or a URL template; version entries keep the existing model unchanged.
+    // String form remains the canonical/default source for V1 and V2.
+    // `source_mirrors` is populated when source is a GLOBAL/CN map.
     std::string source;
+    std::unordered_map<std::string, std::string> source_mirrors;
     std::unordered_map<std::string, std::string> platform_sources;
+    std::unordered_map<std::string,
+        std::unordered_map<std::string, std::string>> platform_source_mirrors;
     // platform -> version -> resource
     std::unordered_map<std::string,
         std::unordered_map<std::string, PlatformResource>> entries;

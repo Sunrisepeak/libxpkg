@@ -140,11 +140,16 @@ std::expected<ResolvedResource, std::string> resolve_resource(
     else
         source = matrix.source;
 
-    if (auto mirrors_it = matrix.platform_source_mirrors.find(context.platform);
-            mirrors_it != matrix.platform_source_mirrors.end())
-        source_mirrors = mirrors_it->second;
-    else
+    const bool has_platform_source =
+        matrix.platform_sources.contains(context.platform);
+
+    if (has_platform_source) {
+        if (auto mirrors_it = matrix.platform_source_mirrors.find(context.platform);
+                mirrors_it != matrix.platform_source_mirrors.end())
+            source_mirrors = mirrors_it->second;
+    } else {
         source_mirrors = matrix.source_mirrors;
+    }
 
     if (result.mirrors.empty() && !source_mirrors.empty())
         result.mirrors = source_mirrors;

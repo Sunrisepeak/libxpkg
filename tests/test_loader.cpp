@@ -35,6 +35,14 @@ static const fs::path PKGINDEX_BUILD{
     std::string(normalize_pkgindex_macro(XPKG_STRINGIFY(XPKG_TEST_PKGINDEX_BUILD)))
 };
 
+static const fs::path PKGINDEX_NAMESPACES{
+    PKGINDEX.parent_path() / "pkgindex-namespaces"
+};
+
+static const fs::path PKGINDEX_DUPLICATE{
+    PKGINDEX.parent_path() / "pkgindex-duplicate"
+};
+
 static fs::path copy_pkgindex_build_fixture(std::string_view test_name) {
     auto destination = fs::temp_directory_path()
         / ("libxpkg-loader-" + std::string(test_name));
@@ -80,6 +88,32 @@ TEST(LoaderTest, BuildIndex_ReturnsEntries) {
     ASSERT_TRUE(result.has_value()) << result.error();
     EXPECT_GT(result->entries.size(), 0u);
     EXPECT_GT(result->entries.count("hello"), 0u);
+}
+
+TEST(LoaderTest, BuildIndex_PreservesSameNameAcrossNamespaces) {
+    auto result = build_index(PKGINDEX_NAMESPACES, "repo-default");
+    ASSERT_TRUE(result.has_value()) << result.error();
+
+    ASSERT_EQ(result->entries.size(), 2u);
+    EXPECT_TRUE(result->entries.contains("alpha:demo"));
+    EXPECT_TRUE(result->entries.contains("beta:demo"));
+    EXPECT_EQ(result->entries.at("alpha:demo").identity.namespaceName, "alpha");
+    EXPECT_EQ(result->entries.at("alpha:demo").identity.name, "demo");
+    EXPECT_EQ(result->entries.at("beta:demo").identity.namespaceName, "beta");
+    EXPECT_EQ(result->entries.at("beta:demo").identity.name, "demo");
+
+    ASSERT_TRUE(result->shortNames.contains("demo"));
+    EXPECT_EQ(result->shortNames.at("demo"),
+              (std::vector<std::string> { "alpha:demo", "beta:demo" }));
+}
+
+TEST(LoaderTest, BuildIndex_RejectsDuplicateEffectiveIdentity) {
+    auto result = build_index(PKGINDEX_DUPLICATE, "alpha");
+    ASSERT_FALSE(result.has_value());
+    EXPECT_NE(result.error().find("duplicate package identity 'alpha:demo'"),
+              std::string::npos);
+    EXPECT_NE(result.error().find("implicit.demo.lua"), std::string::npos);
+    EXPECT_NE(result.error().find("explicit.demo.lua"), std::string::npos);
 }
 
 TEST(LoaderTest, BuildIndex_PkgindexBuild_OsFiles) {

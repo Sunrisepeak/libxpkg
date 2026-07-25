@@ -682,7 +682,7 @@ load_package(const fs::path& pkg_path) {
 }
 
 std::expected<PackageIndex, std::string>
-build_index(const fs::path& repo_dir, const std::string& namespace_ = "") {
+build_index(const fs::path& repo_dir, const std::string& defaultNamespace = "") {
     PackageIndex index;
     auto pkgs_dir = repo_dir / "pkgs";
     if (!fs::is_directory(pkgs_dir))
@@ -691,23 +691,63 @@ build_index(const fs::path& repo_dir, const std::string& namespace_ = "") {
     // Run pkgindex-build.lua if present (generates complete package files)
     loader_detail::run_pkgindex_build(repo_dir);
 
+    std::vector<fs::path> packagePaths;
     for (auto& letter_dir : fs::directory_iterator(pkgs_dir)) {
         if (!letter_dir.is_directory()) continue;
         for (auto& entry : fs::directory_iterator(letter_dir)) {
             if (entry.path().extension() != ".lua") continue;
-            auto result = load_package(entry.path());
-            if (!result) continue;  // skip malformed packages
-            auto& pkg = *result;
-            std::string key = (namespace_.empty() ? "" : namespace_ + "-x-")
-                            + pkg.name;
-            IndexEntry ie;
-            ie.name        = key;
-            ie.path        = entry.path();
-            ie.type        = pkg.type;
-            ie.description = pkg.description;
-            index.entries[key] = std::move(ie);
+            packagePaths.push_back(entry.path().lexically_normal());
         }
     }
+    std::ranges::sort(packagePaths);
+
+    for (auto& packagePath : packagePaths) {
+        auto result = load_package(packagePath);
+        if (!result) continue;  // skip malformed packages
+        auto& pkg = *result;
+
+        PackageIdentity identity {
+            .namespaceName = pkg.namespace_.empty()
+                ? defaultNamespace
+                : pkg.namespace_,
+            .name = pkg.name,
+        };
+        auto canonicalName = identity.canonical_name();
+
+        IndexEntry indexEntry;
+        indexEntry.identity = std::move(identity);
+        indexEntry.canonicalName = canonicalName;
+        indexEntry.entryKey = canonicalName;
+        indexEntry.name = pkg.name;
+        indexEntry.path = packagePath;
+        indexEntry.type = pkg.type;
+        indexEntry.description = pkg.description;
+
+        auto existing = index.entries.find(indexEntry.entryKey);
+        if (existing != index.entries.end()) {
+            return std::unexpected(std::format(
+                "duplicate package identity '{}': '{}' conflicts with '{}'",
+                canonicalName,
+                existing->second.path.string(),
+                packagePath.string()));
+        }
+
+        index.entries.emplace(indexEntry.entryKey, std::move(indexEntry));
+        index.identityEntries[canonicalName].push_back(canonicalName);
+        index.shortNames[pkg.name].push_back(canonicalName);
+    }
+
+    for (auto& [_, candidates] : index.identityEntries) {
+        std::ranges::sort(candidates);
+        auto uniqueEnd = std::ranges::unique(candidates).begin();
+        candidates.erase(uniqueEnd, candidates.end());
+    }
+    for (auto& [_, candidates] : index.shortNames) {
+        std::ranges::sort(candidates);
+        auto uniqueEnd = std::ranges::unique(candidates).begin();
+        candidates.erase(uniqueEnd, candidates.end());
+    }
+
     return index;
 }
 

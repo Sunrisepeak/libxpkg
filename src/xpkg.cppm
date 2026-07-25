@@ -131,8 +131,18 @@ struct Package {
     ~Package();
 };
 
+struct PackageIdentity {
+    std::string namespaceName;
+    std::string name;
+
+    std::string canonical_name() const;
+};
+
 struct IndexEntry {
-    std::string name;         // e.g. "vscode@1.85.0"
+    PackageIdentity identity;
+    std::string canonicalName;
+    std::string entryKey;
+    std::string name;         // descriptor package.name
     std::string version;
     std::filesystem::path path;
     PackageType type  = PackageType::Package;
@@ -143,6 +153,8 @@ struct IndexEntry {
 
 struct PackageIndex {
     std::unordered_map<std::string, IndexEntry> entries;
+    std::unordered_map<std::string, std::vector<std::string>> identityEntries;
+    std::unordered_map<std::string, std::vector<std::string>> shortNames;
     std::unordered_map<std::string, std::vector<std::string>> mutex_groups;
     ~PackageIndex();
 };
@@ -171,6 +183,11 @@ PlatformMatrix::~PlatformMatrix() = default;
 Package::~Package()       = default;
 PackageIndex::~PackageIndex() = default;
 IndexRepos::~IndexRepos() = default;
+
+std::string PackageIdentity::canonical_name() const {
+    if (namespaceName.empty()) return name;
+    return namespaceName + ":" + name;
+}
 
 std::string normalize_arch(std::string_view raw) {
     std::string s;

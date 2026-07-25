@@ -65,6 +65,72 @@ TEST(IndexTest, Search_NoMatch) {
     EXPECT_TRUE(results.empty());
 }
 
+TEST(IndexTest, FindCandidates_ExplicitNamespaceIsExact) {
+    PackageIndex idx;
+    IndexEntry entry;
+    entry.identity = {
+        .namespaceName = "alpha",
+        .name = "demo",
+    };
+    entry.canonicalName = "alpha:demo";
+    entry.entryKey = "alpha:demo";
+    entry.name = "demo";
+    idx.entries[entry.entryKey] = entry;
+    idx.identityEntries[entry.canonicalName].push_back(entry.entryKey);
+    idx.shortNames["demo"] = {"alpha:demo", "beta:demo"};
+
+    auto result = find_candidates(idx, "demo", std::string_view { "alpha" });
+
+    EXPECT_EQ(result, (std::vector<std::string> { "alpha:demo" }));
+}
+
+TEST(IndexTest, FindCandidates_BareNameReturnsAllSortedIdentities) {
+    PackageIndex idx;
+    idx.shortNames["demo"] = {"alpha:demo", "beta:demo"};
+
+    auto result = find_candidates(idx, "demo");
+
+    EXPECT_EQ(result,
+              (std::vector<std::string> { "alpha:demo", "beta:demo" }));
+}
+
+TEST(IndexTest, Resolve_BareAliasRefInheritsCandidateNamespace) {
+    PackageIndex idx;
+    IndexEntry alias;
+    alias.identity = {
+        .namespaceName = "alpha",
+        .name = "tool",
+    };
+    alias.canonicalName = "alpha:tool";
+    alias.entryKey = "alpha:tool";
+    alias.name = "tool";
+    alias.ref = "compiler@1.0.0";
+    idx.entries[alias.entryKey] = alias;
+
+    EXPECT_EQ(resolve(idx, "alpha:tool"), "alpha:compiler@1.0.0");
+}
+
+TEST(IndexTest, MatchVersion_DoesNotCrossNamespaceIdentity) {
+    PackageIndex idx;
+    auto add = [&](std::string entryKey, std::string canonicalName,
+                   std::string version, bool installed) {
+        IndexEntry entry;
+        entry.entryKey = entryKey;
+        entry.canonicalName = canonicalName;
+        entry.version = version;
+        entry.installed = installed;
+        idx.entries[entryKey] = entry;
+        idx.identityEntries[canonicalName].push_back(entryKey);
+    };
+    add("alpha:demo@1.0.0", "alpha:demo", "1.0.0", false);
+    add("beta:demo@9.0.0", "beta:demo", "9.0.0", true);
+
+    auto result = match_version(idx, "alpha:demo");
+
+    ASSERT_TRUE(result.has_value());
+    EXPECT_EQ(*result, "alpha:demo@1.0.0");
+}
+
 // ── resolve ───────────────────────────────────────────────────────────────
 
 TEST(IndexTest, Resolve_FollowsAlias) {
@@ -150,8 +216,20 @@ TEST(IndexTest, Merge_AppliesNamespace) {
     overlay.entries["cmake"] = e;
 
     auto merged = merge(base, overlay, "extra");
-    EXPECT_GT(merged.entries.count("extra-x-cmake"), 0u);
+    EXPECT_GT(merged.entries.count("extra:cmake"), 0u);
     EXPECT_EQ(merged.entries.count("cmake"), 0u);
+}
+
+TEST(IndexTest, Merge_PreservesLegacyVersionedEntryKey) {
+    PackageIndex base, overlay;
+    IndexEntry entry;
+    entry.name = "cmake@3.31.0";
+    overlay.entries["cmake@3.31.0"] = entry;
+
+    auto merged = merge(std::move(base), overlay, "extra");
+
+    EXPECT_TRUE(merged.entries.contains("extra:cmake@3.31.0"));
+    EXPECT_EQ(merged.entries.at("extra:cmake@3.31.0").version, "3.31.0");
 }
 
 TEST(IndexTest, Merge_PreservesBase) {
@@ -159,6 +237,32 @@ TEST(IndexTest, Merge_PreservesBase) {
     PackageIndex overlay;
     auto merged = merge(base, overlay);
     EXPECT_EQ(merged.entries.size(), base.entries.size());
+}
+
+TEST(IndexTest, Merge_RejectsDuplicateCanonicalIdentity) {
+    PackageIndex base, overlay;
+    IndexEntry baseEntry;
+    baseEntry.identity = {
+        .namespaceName = "alpha",
+        .name = "demo",
+    };
+    baseEntry.name = "demo";
+    base.entries["alpha:demo"] = baseEntry;
+
+    IndexEntry overlayEntry;
+    overlayEntry.identity = {
+        .namespaceName = "alpha",
+        .name = "demo",
+    };
+    overlayEntry.name = "demo";
+    overlay.entries["alpha:demo"] = overlayEntry;
+
+    EXPECT_THROW(
+        {
+            auto ignored = merge(std::move(base), overlay);
+            static_cast<void>(ignored);
+        },
+        std::invalid_argument);
 }
 
 // ── set_installed ─────────────────────────────────────────────────────────

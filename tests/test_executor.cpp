@@ -1105,3 +1105,113 @@ TEST(ExecutorTest, ApplyInstallStamp_IsIdempotent) {
 
     fs::remove_all(temp);
 }
+
+// ============================================================
+// files assets and injected args
+//
+// `includedir` could only say "this one directory becomes sysroot include".
+// It could not express a destination, an asset that is not a header, or a
+// source and destination that differ in name -- openssl's `lib64/` ->
+// `usr/lib/` is all three at once. With no way to say it, package indexes
+// grow their own file-placing helpers and the tool managing versions can
+// neither see nor undo them.
+//
+// `args` is separate from `alias` because the only way to inject anything
+// used to be appending it to the alias string, which consumers then split on
+// the first space -- broken by any path containing one, and it makes every
+// reader of `alias` report a command line where a name belongs.
+// ============================================================
+
+namespace {
+
+// Write a recipe whose config() hook is `body`, and return its ops.
+std::vector<XvmOp> ops_from_config(const fs::path& dir, const char* body) {
+    fs::create_directories(dir);
+    auto pkg = dir / "opsfixture.lua";
+    std::string lua =
+        "package = { spec = \"1\", name = \"opsfixture\", type = \"package\",\n"
+        "    xpm = { linux = { [\"1.0.0\"] = {} },\n"
+        "            macosx = { [\"1.0.0\"] = {} },\n"
+        "            windows = { [\"1.0.0\"] = {} } } }\n"
+        "import(\"xim.libxpkg.xvm\")\n"
+        "function config()\n";
+    lua += body;
+    lua += "\n    return true\nend\n";
+    std::ofstream(pkg) << lua;
+
+    auto exec = create_executor(pkg.string());
+    EXPECT_TRUE(exec.has_value());
+    if (!exec) return {};
+    auto ctx = make_context(dir, "linux");
+    ctx.pkg_name = "opsfixture";
+    auto hook = exec->run_hook(HookType::Config, ctx);
+    EXPECT_TRUE(hook.success) << hook.error;
+    return exec->xvm_operations();
+}
+
+} // namespace
+
+TEST(ExecutorTest, XvmAdd_CarriesSrcAndDstForFilesAssets) {
+    auto dir = fs::temp_directory_path() / "libxpkg_files_assets";
+    fs::remove_all(dir);
+    auto ops = ops_from_config(dir,
+        "    xvm.add(\"pkg.files.1\", { type = \"files\",\n"
+        "        src = \"include/openssl\", dst = \"usr/include/openssl\" })");
+
+    ASSERT_EQ(ops.size(), 1u);
+    EXPECT_EQ(ops[0].type, "files");
+    EXPECT_EQ(ops[0].src, "include/openssl");
+    EXPECT_EQ(ops[0].dst, "usr/include/openssl");
+    fs::remove_all(dir);
+}
+
+TEST(ExecutorTest, XvmAdd_CarriesInjectedArgsInOrder) {
+    auto dir = fs::temp_directory_path() / "libxpkg_args";
+    fs::remove_all(dir);
+    auto ops = ops_from_config(dir,
+        "    xvm.add(\"clang\", { args = { \"-isystem\", \"/a b/include\",\n"
+        "                                  \"--sysroot=/root\" } })");
+
+    ASSERT_EQ(ops.size(), 1u);
+    ASSERT_EQ(ops[0].args.size(), 3u);
+    EXPECT_EQ(ops[0].args[0], "-isystem");
+    // A path containing a space survives, which it cannot when arguments are
+    // smuggled through `alias` and split on the first one.
+    EXPECT_EQ(ops[0].args[1], "/a b/include");
+    EXPECT_EQ(ops[0].args[2], "--sysroot=/root");
+    EXPECT_TRUE(ops[0].alias.empty()) << "args must not leak into alias";
+    fs::remove_all(dir);
+}
+
+TEST(ExecutorTest, XvmFiles_DerivesADistinctTargetPerDeclaration) {
+    auto dir = fs::temp_directory_path() / "libxpkg_files_sugar";
+    fs::remove_all(dir);
+    auto ops = ops_from_config(dir,
+        "    xvm.files({ src = \"include\", dst = \"usr/include\" })\n"
+        "    xvm.files({ src = \"lib64\",   dst = \"usr/lib\" })");
+
+    ASSERT_EQ(ops.size(), 2u);
+    EXPECT_EQ(ops[0].type, "files");
+    EXPECT_EQ(ops[1].type, "files");
+    EXPECT_EQ(ops[0].src, "include");
+    EXPECT_EQ(ops[1].src, "lib64");
+    // Names are derived, not caller-supplied, so two declarations from one
+    // package cannot collide.
+    EXPECT_NE(ops[0].name, ops[1].name);
+    fs::remove_all(dir);
+}
+
+TEST(ExecutorTest, XvmAdd_OmittingTheNewFieldsLeavesThemEmpty) {
+    auto dir = fs::temp_directory_path() / "libxpkg_no_new_fields";
+    fs::remove_all(dir);
+    // An existing recipe must be completely unaffected.
+    auto ops = ops_from_config(dir,
+        "    xvm.add(\"tool\", { bindir = \"bin\", binding = \"root@1.0.0\" })");
+
+    ASSERT_EQ(ops.size(), 1u);
+    EXPECT_TRUE(ops[0].src.empty());
+    EXPECT_TRUE(ops[0].dst.empty());
+    EXPECT_TRUE(ops[0].args.empty());
+    EXPECT_EQ(ops[0].binding, "root@1.0.0");
+    fs::remove_all(dir);
+}

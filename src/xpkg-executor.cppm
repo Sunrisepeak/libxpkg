@@ -56,10 +56,37 @@ struct XvmOp {
     std::string version;
     std::string bindir;
     std::string alias;
-    std::string type;       // "program" | "lib"
+    std::string type;       // "program" | "lib" | "files"
     std::string filename;
     std::string binding;
     std::string includedir; // for headers/remove_headers ops
+
+    // type = "files": one asset the package places into the subos.
+    //
+    // Both ends are relative, and that is a requirement rather than a
+    // convention. A payload is shared between subos and reference-counted,
+    // so an absolute destination recorded against it would be wrong for
+    // every subos but the one that installed it. `src` is relative to the
+    // payload root, `dst` to the subos root; the consumer resolves them and
+    // rejects anything absolute or escaping.
+    //
+    // Exists because `includedir` can only say "this one directory becomes
+    // sysroot include". It cannot express a destination, an asset that is
+    // not a header, or a source and destination that differ in name --
+    // openssl's `lib64/` -> `usr/lib/` is all three at once. Without a way
+    // to say it, package indexes grow their own file-placing helpers, and
+    // the tool managing versions cannot see or undo any of them.
+    std::string src;
+    std::string dst;
+
+    // Arguments injected ahead of the user's own when a program shim
+    // dispatches. Separate from `alias` on purpose: the only way to inject
+    // anything today is to append it to the alias string, which consumers
+    // then split on the first space. That breaks on any path containing one,
+    // and it makes every reader of `alias` -- version listings, diagnostics
+    // -- report a command line where a name belongs.
+    std::vector<std::string> args;
+
     std::vector<std::pair<std::string, std::string>> envs; // environment variables
 };
 
@@ -794,6 +821,23 @@ public:
                 op.filename   = read_field("filename");
                 op.binding    = read_field("binding");
                 op.includedir = read_field("includedir");
+                op.src        = read_field("src");
+                op.dst        = read_field("dst");
+
+                // Read args array (ordered; empty when absent)
+                lua::getfield(L_, -1, "args");
+                if (lua::type(L_, -1) == lua::TTABLE) {
+                    for (int i = 1;; ++i) {
+                        lua::rawgeti(L_, -1, i);
+                        if (lua::type(L_, -1) != lua::TSTRING) {
+                            lua::pop(L_, 1);
+                            break;
+                        }
+                        op.args.emplace_back(lua::tostring(L_, -1));
+                        lua::pop(L_, 1);
+                    }
+                }
+                lua::pop(L_, 1);
 
                 // Read envs table (key-value pairs)
                 lua::getfield(L_, -1, "envs");

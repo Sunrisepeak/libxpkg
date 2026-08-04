@@ -78,88 +78,62 @@ libxpkg/
 │   ├── test_model.cpp
 │   ├── test_loader.cppm
 │   ├── test_index.cpp
-│   ├── test_executor.cpp
-│   └── xmake.lua
+│   └── test_executor.cpp
 ├── examples/
 │   ├── basic.cpp              # 最小示例
-│   ├── lifecycle.cpp          # 完整生命周期演示
-│   └── xmake.lua
+│   └── lifecycle.cpp          # 完整生命周期演示
+├── build.mcpp                 # 构建期由 lua-stdlib/ 生成嵌入式 Lua stdlib
 ├── .agents/
 │   ├── docs/                  # 开发问题排查报告
 │   ├── plans/                 # 设计与实现方案
 │   └── skills/                # 项目最佳实践
-├── xmake.lua
-└── CMakeLists.txt
+└── mcpp.toml
 ```
 
 ## 构建与测试
 
-**前置条件**：GCC 15+ 或 Clang 20+（需支持 C++23 模块）
+本库由 **mcpp** 构建。mcpp 自带受管沙箱(工具链由 `mcpp.toml` 固定),
+不需要手工准备编译器,也不再有 xmake / CMake 构建入口。
 
 ```bash
-# Linux（通过 xlings 安装 GCC 15）
-xlings install gcc@15.1 -y
-xmake f -m release -y
-xmake
-
-# macOS（通过 Homebrew 安装 LLVM 20）
-brew install llvm@20
-export PATH=/opt/homebrew/opt/llvm@20/bin:$PATH
-xmake f --toolchain=llvm --sdk=/opt/homebrew/opt/llvm@20 -m release -y
-xmake
+xlings install -y   # 装 .xlings.json 里固定的 mcpp
+mcpp build
+mcpp test
 ```
 
-**运行测试**
+macOS 专用的 elfpatch 用例需要 `install_name_tool`,在 Linux 上跑不了,
+CI 里按名字过滤:
 
 ```bash
-xmake run xpkg_model_test
-xmake run xpkg_index_test
-xmake run xpkg_loader_test
-xmake run xpkg_executor_test
+mcpp test -- --gtest_filter=-ExecutorTest.ApplyElfpatchAuto_*
 ```
 
-**运行示例**
+**Lua stdlib 的生成**
 
-```bash
-xmake run basic
-xmake run lifecycle
-```
+`src/lua-stdlib/**.lua` 是唯一的源码。它需要以裸字符串字面量的形式进二进制,
+这一步由 `build.mcpp` 在构建期完成:生成的 `xpkg-lua-stdlib.cppm` 写进
+`MCPP_OUT_DIR`,通过 `generated=` 交给构建,**不进版本库**。
+
+所以改完 `.lua` 直接 `mcpp build` 即可,没有"忘记重新生成"这回事 ——
+仓库里只有一份拷贝,两份拷贝对不上这种状态不存在。
+
+(它曾经存在过:0.0.47 的 `xvm.files` 只改了生成物,源 `.lua` 一直没有。)
 
 ## CI/CD
 
-GitHub Actions 在三个平台上自动构建和测试：
+GitHub Actions 在 Linux 上构建并测试,工具链由 mcpp 沙箱提供:
 
-| 平台 | 工具链 | 状态 |
-|------|--------|------|
-| Linux (ubuntu-latest) | GCC 15.1 via Xlings | [![Linux](https://github.com/Sunrisepeak/libxpkg/actions/workflows/ci.yml/badge.svg)](https://github.com/Sunrisepeak/libxpkg/actions/workflows/ci.yml) |
-| macOS 14 | LLVM 20 via Homebrew | [![macOS](https://github.com/Sunrisepeak/libxpkg/actions/workflows/ci.yml/badge.svg)](https://github.com/Sunrisepeak/libxpkg/actions/workflows/ci.yml) |
-| Windows (latest) | MSVC via xmake | [![Windows](https://github.com/Sunrisepeak/libxpkg/actions/workflows/ci.yml/badge.svg)](https://github.com/Sunrisepeak/libxpkg/actions/workflows/ci.yml) |
+| 平台 | 构建 | 状态 |
+|------|------|------|
+| Linux (ubuntu-latest) | mcpp(沙箱内 GCC) | [![CI](https://github.com/openxlings/libxpkg/actions/workflows/ci.yml/badge.svg)](https://github.com/openxlings/libxpkg/actions/workflows/ci.yml) |
 
-## xmake 集成
+## 作为依赖引入
 
-**引入全部模块**（推荐）：
+在使用方的 `mcpp.toml` 里声明:
 
-```lua
-add_repositories("mcpplibs-index https://github.com/mcpplibs/mcpplibs-index.git")
-add_requires("mcpplibs-xpkg")
-
-target("myapp")
-    set_kind("binary")
-    set_languages("c++23")
-    add_files("main.cpp")
-    add_deps("xpkg")  -- 聚合 target，包含所有子模块
-    set_policy("build.c++.modules", true)
-```
-
-**按需引入单个子模块**：
-
-```lua
-target("myapp")
-    set_kind("binary")
-    set_languages("c++23")
-    add_files("main.cpp")
-    add_deps("mcpplibs-xpkg", "mcpplibs-xpkg-loader")  -- 仅引入数据模型 + 加载器
-    set_policy("build.c++.modules", true)
+```toml
+[dependencies]
+"mcpplibs.xpkg" = "0.0.48"
 ```
 
 ## 相关链接

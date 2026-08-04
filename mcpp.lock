@@ -6,3 +6,4 @@ namespace = "mcpplibs.capi"
 version = "0.0.3"
 source  = "index+mcpplibs.capi@0.0.3"
 hash    = "fnv1a:c8e7ef9d60a1a3a6"
+

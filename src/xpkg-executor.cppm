@@ -52,6 +52,7 @@ struct HookResult {
 
 struct XvmOp {
     std::string op;         // "add" | "remove" | "headers" | "remove_headers"
+                            // | "subos_env"
     std::string name;
     std::string version;
     std::string bindir;
@@ -86,6 +87,23 @@ struct XvmOp {
     // and it makes every reader of `alias` -- version listings, diagnostics
     // -- report a command line where a name belongs.
     std::vector<std::string> args;
+
+    // op = "subos_env": one environment variable the subos exports to every
+    // process that enters it.
+    //
+    // Distinct from `envs` above, which is the environment a single program
+    // shim sets for itself when dispatched. That scope cannot serve a
+    // discovery protocol: the program that has to see LIBGL_DRIVERS_PATH is
+    // the user's own binary, which xlings never wraps. Same reason `src`/`dst`
+    // exist rather than another meaning piled onto `includedir` -- a new scope
+    // needs its own fields, or every reader has to know which op it is looking
+    // at before it can trust a value.
+    //
+    // `mode` carries the recipe's `op = "set"|"prepend"` argument, because
+    // `op` itself is already the category the consumer dispatches on.
+    std::string var;
+    std::string value;
+    std::string mode;
 
     std::vector<std::pair<std::string, std::string>> envs; // environment variables
 };
@@ -529,6 +547,7 @@ bool load_stdlib(lua::State* L, std::string& err_out) {
         { "log",        detail::log_lua        },
         { "pkginfo",    detail::pkginfo_lua    },
         { "system",     detail::system_lua     },
+        { "subos",      detail::subos_lua      },
         { "xvm",        detail::xvm_lua        },
         { "utils",      detail::utils_lua      },
         { "pkgmanager", detail::pkgmanager_lua },
@@ -821,6 +840,9 @@ public:
                 op.filename   = read_field("filename");
                 op.binding    = read_field("binding");
                 op.includedir = read_field("includedir");
+                op.var        = read_field("var");
+                op.value      = read_field("value");
+                op.mode       = read_field("mode");
                 op.src        = read_field("src");
                 op.dst        = read_field("dst");
 

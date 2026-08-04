@@ -1125,7 +1125,8 @@ TEST(ExecutorTest, ApplyInstallStamp_IsIdempotent) {
 namespace {
 
 // Write a recipe whose config() hook is `body`, and return its ops.
-std::vector<XvmOp> ops_from_config(const fs::path& dir, const char* body) {
+std::vector<XvmOp> ops_from_config(const fs::path& dir, const char* body,
+                                   const char* extra_imports = "") {
     fs::create_directories(dir);
     auto pkg = dir / "opsfixture.lua";
     std::string lua =
@@ -1133,8 +1134,9 @@ std::vector<XvmOp> ops_from_config(const fs::path& dir, const char* body) {
         "    xpm = { linux = { [\"1.0.0\"] = {} },\n"
         "            macosx = { [\"1.0.0\"] = {} },\n"
         "            windows = { [\"1.0.0\"] = {} } } }\n"
-        "import(\"xim.libxpkg.xvm\")\n"
-        "function config()\n";
+        "import(\"xim.libxpkg.xvm\")\n";
+    lua += extra_imports;
+    lua += "function config()\n";
     lua += body;
     lua += "\n    return true\nend\n";
     std::ofstream(pkg) << lua;
@@ -1213,5 +1215,132 @@ TEST(ExecutorTest, XvmAdd_OmittingTheNewFieldsLeavesThemEmpty) {
     EXPECT_TRUE(ops[0].dst.empty());
     EXPECT_TRUE(ops[0].args.empty());
     EXPECT_EQ(ops[0].binding, "root@1.0.0");
+    fs::remove_all(dir);
+}
+
+// ── subos.env: subos-scoped environment declarations ─────────────────────
+//
+// A separate op kind rather than more fields on `add`, because the scope is
+// different: `envs` on an add is what one program shim exports for itself,
+// and the program that has to see LIBGL_DRIVERS_PATH is the user's own
+// binary, which xlings never wraps.
+
+namespace {
+
+constexpr const char* SUBOS_IMPORT = "import(\"xim.libxpkg.subos\")\n";
+
+} // namespace
+
+TEST(ExecutorTest, SubosEnv_RecordsASetDeclaration) {
+    auto dir = fs::temp_directory_path() / "libxpkg_subos_env_set";
+    fs::remove_all(dir);
+    auto ops = ops_from_config(dir,
+        "    subos.env({ var = \"LIBGL_DRIVERS_PATH\", op = \"set\",\n"
+        "                value = \"${pkgdir}/lib/dri\",\n"
+        "                binding = \"compat.mesa@25.0.0\" })",
+        SUBOS_IMPORT);
+
+    ASSERT_EQ(ops.size(), 1u);
+    EXPECT_EQ(ops[0].op, "subos_env");
+    EXPECT_EQ(ops[0].var, "LIBGL_DRIVERS_PATH");
+    // The recipe's `op` argument travels as `mode`; `op` is the category the
+    // consumer dispatches on and was already taken.
+    EXPECT_EQ(ops[0].mode, "set");
+    EXPECT_EQ(ops[0].value, "${pkgdir}/lib/dri");
+    EXPECT_EQ(ops[0].binding, "compat.mesa@25.0.0");
+    fs::remove_all(dir);
+}
+
+TEST(ExecutorTest, SubosEnv_RecordsAPrependDeclaration) {
+    auto dir = fs::temp_directory_path() / "libxpkg_subos_env_prepend";
+    fs::remove_all(dir);
+    auto ops = ops_from_config(dir,
+        "    subos.env({ var = \"XDG_DATA_DIRS\", op = \"prepend\",\n"
+        "                value = \"${pkgdir}/share\",\n"
+        "                binding = \"compat.mesa@25.0.0\" })",
+        SUBOS_IMPORT);
+
+    ASSERT_EQ(ops.size(), 1u);
+    EXPECT_EQ(ops[0].mode, "prepend");
+    EXPECT_EQ(ops[0].var, "XDG_DATA_DIRS");
+    fs::remove_all(dir);
+}
+
+TEST(ExecutorTest, SubosEnv_DefaultsOpToSetAndBindingToThePackage) {
+    auto dir = fs::temp_directory_path() / "libxpkg_subos_env_defaults";
+    fs::remove_all(dir);
+    auto ops = ops_from_config(dir,
+        "    subos.env({ var = \"MESA_LOADER_DRIVER_OVERRIDE\",\n"
+        "                value = \"swrast\" })",
+        SUBOS_IMPORT);
+
+    ASSERT_EQ(ops.size(), 1u);
+    EXPECT_EQ(ops[0].mode, "set");
+    EXPECT_EQ(ops[0].binding, "opsfixture@1.0.0");
+    fs::remove_all(dir);
+}
+
+TEST(ExecutorTest, SubosEnv_RejectsAnOpThisClientDoesNotImplement) {
+    auto dir = fs::temp_directory_path() / "libxpkg_subos_env_badop";
+    fs::remove_all(dir);
+    // `append` is a documented future op. Recording it as if it were `set`
+    // would put a value in the manifest that no one asked for; dropping it
+    // silently would be the same bug one layer down. It is refused, and the
+    // recipe sees `false`.
+    auto ops = ops_from_config(dir,
+        "    local ok = subos.env({ var = \"PATH\", op = \"append\",\n"
+        "                           value = \"${pkgdir}/bin\" })\n"
+        "    xvm.add(\"probe.returned.\" .. tostring(ok))",
+        SUBOS_IMPORT);
+
+    ASSERT_EQ(ops.size(), 1u);
+    EXPECT_EQ(ops[0].name, "probe.returned.false");
+    fs::remove_all(dir);
+}
+
+TEST(ExecutorTest, SubosEnv_RejectsAMissingVariableName) {
+    auto dir = fs::temp_directory_path() / "libxpkg_subos_env_novar";
+    fs::remove_all(dir);
+    auto ops = ops_from_config(dir,
+        "    local ok = subos.env({ value = \"anything\" })\n"
+        "    xvm.add(\"probe.returned.\" .. tostring(ok))",
+        SUBOS_IMPORT);
+
+    ASSERT_EQ(ops.size(), 1u);
+    EXPECT_EQ(ops[0].name, "probe.returned.false");
+    fs::remove_all(dir);
+}
+
+// The capability probe a recipe has to write, and the reason it cannot be
+// spelled the obvious way.
+//
+// import() answers an unknown module with a permissive proxy: every key read
+// off it is a truthy callable table. So on a client that predates this module,
+// `if subos.env then` is *true*, the recipe takes the new branch, and the call
+// evaporates -- install succeeds, nothing is configured, nothing complains.
+//
+// `if xvm.files then` in the V2 spec is safe only because `xvm` is a module
+// those clients already ship, so the missing *field* really is nil. A missing
+// *module* never is. type() is what separates them.
+TEST(ExecutorTest, SubosEnv_ProbeMustTestTypeBecauseUnknownModulesAreTruthy) {
+    auto dir = fs::temp_directory_path() / "libxpkg_subos_env_probe";
+    fs::remove_all(dir);
+    auto ops = ops_from_config(dir,
+        "    xvm.add(\"real.truthy.\"  .. tostring(subos.env ~= nil))\n"
+        "    xvm.add(\"real.typed.\"   .. tostring(type(subos.env) == \"function\"))\n"
+        "    xvm.add(\"absent.truthy.\" .. tostring(notyet.env ~= nil))\n"
+        "    xvm.add(\"absent.typed.\"  .. tostring(type(notyet.env) == \"function\"))",
+        "import(\"xim.libxpkg.subos\")\n"
+        "import(\"xim.libxpkg.notyet\")\n");
+
+    ASSERT_EQ(ops.size(), 4u);
+    EXPECT_EQ(ops[0].name, "real.truthy.true");
+    EXPECT_EQ(ops[1].name, "real.typed.true");
+    // Both of these are the point: the truthiness test cannot tell a stub from
+    // a real module, and the type test can.
+    EXPECT_EQ(ops[2].name, "absent.truthy.true")
+        << "if import() ever stopped stubbing unknown modules, the probe rule "
+           "in the V2 spec could be relaxed -- until then it must stay";
+    EXPECT_EQ(ops[3].name, "absent.typed.false");
     fs::remove_all(dir);
 }

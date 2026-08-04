@@ -7,6 +7,30 @@ end
 
 _XVM_OPS = _XVM_OPS or {}
 
+--- Register one entry with the version manager.
+-- @param name  target name
+-- @param opt   table with:
+--   type      "program" (default) | "lib" | "files"
+--   version   defaults to the package version
+--   bindir    directory holding the artifact (default: install_dir)
+--   filename  artifact name inside bindir
+--   alias     name it is exposed under
+--   binding   "<root>@<version>" -- which release this belongs to
+--   args      list of arguments injected ahead of the user's own when the
+--             shim dispatches. Use this rather than appending to `alias`:
+--             consumers split the alias on its first space, so a path with
+--             one in it breaks, and every reader of `alias` then shows a
+--             command line where a name belongs.
+--   envs      environment variables
+--
+-- For type = "files", the entry describes an asset placed into the subos
+-- instead of an artifact to dispatch:
+--   src       source, relative to the payload root
+--   dst       destination, relative to the subos root
+--
+-- Both must be relative. A payload is shared between subos and
+-- reference-counted, so an absolute destination recorded against it would
+-- be correct for exactly one subos and wrong for the rest.
 function M.add(name, opt)
     opt = opt or {}
     local entry = {
@@ -18,11 +42,46 @@ function M.add(name, opt)
         type     = opt.type or "",
         filename = opt.filename or "",
         binding  = opt.binding or "",
+        src      = opt.src or "",
+        dst      = opt.dst or "",
+        args     = opt.args or nil,
         envs     = opt.envs or nil,
     }
     local log = _get_log()
     if log then log.debug("xvm add %s version=%s", name, entry.version) end
     table.insert(_XVM_OPS, entry)
+end
+
+--- Declare an asset this package places into the subos.
+--
+-- Sugar over `M.add` for the case where the entry is a file rather than
+-- something to dispatch, so the caller does not have to invent a target
+-- name: one is derived from the package name. A release may declare several,
+-- and each call adds one.
+--
+-- @param opt  src / dst (both relative, see M.add), plus binding
+function M.files(opt)
+    opt = opt or {}
+    if not opt.src or opt.src == "" then
+        error("xvm.files: src is required")
+    end
+    if not opt.dst or opt.dst == "" then
+        error("xvm.files: dst is required")
+    end
+    local owner = opt.name
+        or (_RUNTIME and _RUNTIME.pkg_name)
+        or "xvm"
+    -- Derived rather than caller-supplied so two declarations from one
+    -- package cannot collide on the same target name.
+    _XVM_FILES_SEQ = (_XVM_FILES_SEQ or 0) + 1
+    local target = string.format("%s.files.%d", owner, _XVM_FILES_SEQ)
+    M.add(target, {
+        type    = "files",
+        src     = opt.src,
+        dst     = opt.dst,
+        version = opt.version,
+        binding = opt.binding,
+    })
 end
 
 function M.remove(name, version)

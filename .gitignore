@@ -1,5 +1,4 @@
-# xmake
-.xmake
+# build output
 build
 target/
 compile_commands.json

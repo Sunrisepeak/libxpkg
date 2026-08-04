@@ -97,7 +97,10 @@ graph TD
 
 #### Lua 运行时兼容层
 
-executor 通过 `prelude.lua`（编译时嵌入 `xpkg-lua-stdlib.cppm`）为包脚本提供 xmake 兼容的运行环境。xpkg V1 规范的包脚本沿用了 xmake 的编程约定，因此 executor 需要兼容这些约定：
+executor 通过 `prelude.lua`（编译时嵌入 `xpkg-lua-stdlib.cppm`）为包脚本提供运行环境。
+这里的"兼容"只涉及**包脚本的 Lua API 约定** —— xpkg V1 规范成型时沿用了 xmake 的写法，
+存量 recipe 依赖这些名字，因此 executor 必须提供同名实现。libxpkg 自身的构建不依赖 xmake
+（构建入口只有 `mcpp`），这两件事没有关系：
 
 | 类别 | 兼容项 | 说明 |
 |------|--------|------|
@@ -131,20 +134,18 @@ libxpkg/
 │   ├── main.cpp
 │   ├── test_loader.cpp
 │   ├── test_index.cpp
-│   ├── test_executor.cpp
-│   └── xmake.lua
+│   └── test_executor.cpp
 ├── examples/
 │   ├── basic.cpp              # 加载包元数据示例
-│   ├── index_demo.cpp         # 构建并搜索索引示例
-│   └── xmake.lua
+│   └── index_demo.cpp         # 构建并搜索索引示例
+├── build.mcpp                 # 构建期由 lua-stdlib/ 生成嵌入式 Lua stdlib
 ├── docs/
 │   └── architecture.md        # 本文档
 ├── .agents/
 │   ├── skills/
 │   └── plans/
 │       └── 2026-03-01-libxpkg-design.md   # 完整设计方案
-├── xmake.lua
-├── CMakeLists.txt
+├── mcpp.toml                  # 唯一构建入口(mcpp build / mcpp test)
 └── README.md
 ```
 

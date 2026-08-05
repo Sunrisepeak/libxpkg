@@ -192,10 +192,61 @@ local function _resolve_dep_via_xvm(dep_name, dep_version)
     return nil
 end
 
+-- The resolver's record for a dependency, if this client sends one.
+--
+-- type(), not truthiness: an unknown _RUNTIME field is nil here, but the same
+-- probe written as `if _RUNTIME.resolved_deps then` on a module proxy is true
+-- everywhere — a trap this repo has fallen into twice (subos.env,
+-- xim.pkgindex.sysroot).
+--
+-- Matched by spec first, because that is the key; then by bare name, because
+-- callers reach this function from several directions and not all of them
+-- still have the original spec string in hand.
+function M.resolved_dep(dep_name, dep_version)
+    local t = _RUNTIME and _RUNTIME.resolved_deps
+    if type(t) ~= "table" then return nil end
+    if dep_version and dep_version ~= "" then
+        local exact = t[dep_name .. "@" .. dep_version]
+        if exact then return exact end
+    end
+    local _, bare = _parse_namespace(dep_name)
+    for spec, rec in pairs(t) do
+        local sname = spec:gsub("@.*", "")
+        local _, sbare = _parse_namespace(sname)
+        if sname == dep_name or sbare == bare then return rec end
+    end
+    return nil
+end
+
+-- Where a dependency actually lives.
+--
+-- The resolver already decided this. Everything below the first branch is a
+-- SECOND answer to a question that has one — kept only for callers with no
+-- install context (tool scripts, offline queries), and noisy on purpose so
+-- that "we guessed" is never silent.
+--
+-- Two independent answers is exactly how a binary ends up with its INTERP
+-- from one glibc and its RUNPATH from another, which segfaults before main
+-- with no diagnostic. See
+-- xlings/.agents/docs/2026-08-05-dependency-resolution-single-source.md
 function M.dep_install_dir(dep_name, dep_version)
+    local rec = M.resolved_dep(dep_name, dep_version)
+    if rec and rec.install_dir and rec.install_dir ~= "" then
+        return rec.install_dir
+    end
+
     local result = _resolve_dep_via_scan(dep_name, dep_version)
-    if result then return result end
-    return _resolve_dep_via_xvm(dep_name, dep_version)
+    if not result then
+        result = _resolve_dep_via_xvm(dep_name, dep_version)
+    end
+    local log = _get_log()
+    if log and _RUNTIME and _RUNTIME.install_dir then
+        -- Inside an install, a miss means the client predates resolved_deps.
+        -- Outside one there is nothing to miss, so no warning.
+        log.warn("dep_install_dir(%s): no resolver record, fell back to a "
+                 .. "scan -> %s", tostring(dep_name), tostring(result))
+    end
+    return result
 end
 
 function M.install_dir(pkgname, pkgversion)

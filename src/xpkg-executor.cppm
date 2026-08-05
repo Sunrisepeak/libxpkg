@@ -22,6 +22,26 @@ struct DepExport {
     std::string abi;                          // e.g. "linux-x86_64-glibc"
 };
 
+// One runtime dependency, as the RESOLVER settled it — not as the recipe
+// spelled it.
+//
+// This is the record that makes "which version is this dependency" have one
+// answer. `DepExport` below cannot serve: it carries only what a dep
+// explicitly declared, so a dep that declared nothing is absent from it, and
+// absence was defined to mean "fall back to convention" — which is a second
+// answerer wearing a different hat. Every runtime dep appears here, declared
+// or not.
+struct ResolvedDep {
+    std::string spec;         // the recipe's own text, e.g. "xim:glibc@>=2.38"
+    std::string name;         // canonical, e.g. "xim:glibc"
+    std::string version;      // what it resolved TO, e.g. "2.44"
+    std::string install_dir;  // absolute payload directory — the authority
+    std::vector<std::string> libdirs;  // absolute; convention-filled when the
+                                       // dep declared none, so no consumer
+                                       // has to re-derive it
+    std::string source;       // why this one: "plan" | "pinned-active" | ...
+};
+
 struct ExecutionContext {
     std::string pkg_name, version, platform, arch;
     fs::path install_file, install_dir;
@@ -38,6 +58,10 @@ struct ExecutionContext {
     // deps that actually declare exports show up; missing entries mean
     // "this dep declared nothing — fall back to convention".
     std::unordered_map<std::string, DepExport> deps_exports;
+    // Keyed by the same spec string as deps_exports, but TOTAL: every runtime
+    // dep is here whether or not it declared exports. Empty only when the
+    // client predates it — libxpkg then degrades to scanning and says so.
+    std::unordered_map<std::string, ResolvedDep> resolved_deps;
     // The current package's own exports (rule 2 in the predicate trigger).
     DepExport self_exports;
     std::string subos_sysrootdir;
@@ -640,6 +664,22 @@ void inject_context(lua::State* L, const mcpplibs::xpkg::ExecutionContext& ctx) 
         lua::setfield(L, -2, dep_spec.c_str());
     }
     lua::setfield(L, -2, "deps_exports");
+
+    // resolved_deps: { [spec] = { name, version, install_dir, libdirs, source } }
+    // Total, unlike deps_exports. A hook that finds a dep missing from HERE is
+    // running on a client that does not send it, not looking at a dep that
+    // declared nothing — the two used to be indistinguishable.
+    lua::newtable(L);
+    for (auto& [dep_spec, r] : ctx.resolved_deps) {
+        lua::newtable(L);
+        set_string_field(L, "name",        r.name);
+        set_string_field(L, "version",     r.version);
+        set_string_field(L, "install_dir", r.install_dir);
+        set_string_field(L, "source",      r.source);
+        push_string_array(r.libdirs, "libdirs");
+        lua::setfield(L, -2, dep_spec.c_str());
+    }
+    lua::setfield(L, -2, "resolved_deps");
 
     // self_exports: same shape as a single deps_exports entry. Empty
     // strings/arrays when the current package didn't declare exports.

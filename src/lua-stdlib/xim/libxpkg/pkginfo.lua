@@ -30,20 +30,97 @@ local function _match_store_name(dirname, ns, bare)
     end
 end
 
+-- Compare two dotted version strings numerically. Components that are not
+-- numbers compare as text, so a date or a hash still orders deterministically.
+local function _version_cmp(a, b)
+    local ai, bi = a:gmatch("[^.]+"), b:gmatch("[^.]+")
+    while true do
+        local x, y = ai(), bi()
+        if x == nil and y == nil then return 0 end
+        local nx, ny = tonumber(x or "0"), tonumber(y or "0")
+        if nx and ny then
+            if nx ~= ny then return nx < ny and -1 or 1 end
+        else
+            local sx, sy = x or "", y or ""
+            if sx ~= sy then return sx < sy and -1 or 1 end
+        end
+    end
+end
+
+-- Does an installed version satisfy a dependency's version EXPRESSION?
+--
+-- The expression is what a recipe wrote — `2.39`, `>=2.38`, `>=1.0 <2.0` — and
+-- it is not a directory name. Joining it to a path was the bug this replaces:
+-- `xpkgs/xim-x-glibc/>=2.39` does not exist, so the scan found nothing and the
+-- caller fell back to whatever version the workspace had ACTIVE. Meanwhile
+-- xlings computed the interpreter from the version the RESOLVER chose. With
+-- two versions of glibc in one home those are different answers, and a binary
+-- whose INTERP is one glibc and whose RUNPATH is another segfaults on the
+-- first instruction — no diagnostic, because both halves are individually
+-- sane.
+--
+-- Only the operators the resolver supports are handled. An expression this
+-- does not understand returns false so the caller keeps its old behaviour
+-- rather than matching something arbitrary.
+local function _version_satisfies(ver, expr)
+    if not expr or expr == "" then return true end
+    for token in expr:gmatch("%S+") do
+        local op, want = token:match("^([<>=~^]*)(.+)$")
+        if want == nil then return false end
+        if op == "" or op == "=" or op == "==" then
+            if ver ~= want then return false end
+        elseif op == ">=" then
+            if _version_cmp(ver, want) < 0 then return false end
+        elseif op == ">" then
+            if _version_cmp(ver, want) <= 0 then return false end
+        elseif op == "<=" then
+            if _version_cmp(ver, want) > 0 then return false end
+        elseif op == "<" then
+            if _version_cmp(ver, want) >= 0 then return false end
+        elseif op == "^" or op == "~" then
+            -- Floor plus a ceiling on the component the operator pins: `^` on
+            -- major, `~` on minor.
+            if _version_cmp(ver, want) < 0 then return false end
+            local keep = (op == "^") and 1 or 2
+            local a, b = {}, {}
+            for c in ver:gmatch("[^.]+")  do a[#a+1] = c end
+            for c in want:gmatch("[^.]+") do b[#b+1] = c end
+            for i = 1, keep do
+                if (a[i] or "") ~= (b[i] or "") then return false end
+            end
+        else
+            return false
+        end
+    end
+    return true
+end
+
 local function _scan_dir(base, ns, bare, dep_version)
     if not base or not os.isdir(base) then return nil end
     local dirs = os.dirs(path.join(base, "*")) or {}
     for _, dep_root in ipairs(dirs) do
         local dirname = path.filename(dep_root)
         if _match_store_name(dirname, ns, bare) then
-            local ver = dep_version
-            if not ver then
-                local vers = os.dirs(path.join(dep_root, "*")) or {}
-                table.sort(vers)
-                if #vers > 0 then ver = path.filename(vers[#vers]) end
+            -- Exact name first: unchanged for every recipe that pins, and it
+            -- also covers a version string that is not semver at all.
+            if dep_version then
+                local exact = path.join(dep_root, dep_version)
+                if os.isdir(exact) then return exact end
             end
-            if ver then
-                local install_dir = path.join(dep_root, ver)
+            -- Otherwise the highest INSTALLED version that satisfies the
+            -- expression — the same choice the resolver makes, which is the
+            -- point: these two have to agree.
+            local vers = os.dirs(path.join(dep_root, "*")) or {}
+            local best = nil
+            for _, vdir in ipairs(vers) do
+                local v = path.filename(vdir)
+                if _version_satisfies(v, dep_version)
+                   and (best == nil or _version_cmp(v, best) > 0) then
+                    best = v
+                end
+            end
+            if best then
+                local install_dir = path.join(dep_root, best)
                 if os.isdir(install_dir) then return install_dir end
             end
         end

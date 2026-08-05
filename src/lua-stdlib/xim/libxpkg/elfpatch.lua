@@ -1135,4 +1135,261 @@ function M.is_shrink()
     return false
 end
 
+-- ─────────────────────────────────────────────────────────────────────
+-- Build-path relocation
+-- ─────────────────────────────────────────────────────────────────────
+--
+-- A downloaded prebuilt carries the absolute paths of the machine that built
+-- it, baked into text files: linker scripts, .pc files, shell wrappers.
+-- Those paths do not exist here, and they leak the build machine's layout
+-- into every artifact we ship.
+--
+-- Recipes have been doing this by hand, and glibc's hand-rolled version got
+-- all three parts wrong at once -- which is why this is a shared capability
+-- rather than a fourth copy:
+--
+--   1. It named six files. Enumerate the payload instead. (R7: a list of
+--      what someone thought of is not a measurement. glibc's list had four
+--      of the five affected files on it and still missed one, and processed
+--      the four wrongly.)
+--
+--   2. Its pattern was `([^%s)]+)/<marker>/lib`. `[^%s)]+` runs LEFTWARD
+--      through anything that is not whitespace or `)` -- including variable
+--      names and quotes. On the real payload it ate `RTLDLIST="` along with
+--      the path, and the `ldd` we ship does not survive `bash -n`. Match an
+--      anchored path TOKEN instead: walk back from the marker to a character
+--      that cannot occur in a path, and require what is left to be absolute.
+--
+--   3. It anchored the tail at `/lib`, so the same file's
+--      `.../share/locale` was left untouched -- the build path stayed in the
+--      artifact, which was the one thing the code existed to prevent. Anchor
+--      at the marker and keep whatever follows.
+--
+-- And it reported success on writing anything at all. Here the rewrite is
+-- ASSERTED, not hoped for (R4): afterwards no marker may remain anywhere in
+-- the payload, and every rewritten shell script must parse. Either failure
+-- raises.
+--
+--   elfpatch.relocate_build_paths{
+--       marker = "fromsource-x-glibc/" .. pkginfo.version(),
+--       dir    = pkginfo.install_dir(),   -- default: install_dir
+--       to     = pkginfo.install_dir(),   -- default: dir
+--   }
+--
+-- `marker` is the part of the build path that identifies this payload -- it
+-- is what makes an absolute path OURS rather than a legitimate reference to
+-- /usr or /etc, which must not be touched.
+
+-- Characters that cannot appear inside a path token in the files we rewrite.
+-- `:` is included because these strings appear in PATH-like lists; `=` and
+-- the quotes because of shell assignments, which is where the old pattern
+-- did its damage.
+local _PATH_DELIMS = {
+    [" "]="", ["\t"]="", ["\n"]="", ["\r"]="", ["\0"]="",
+    ["\""]="", ["'"]="", ["`"]="",
+    ["("]="", [")"]="", ["{"]="", ["}"]="", ["["]="", ["]"]="",
+    ["="]="", [","]="", [";"]="", [":"]="",
+    ["<"]="", [">"]="", ["|"]="", ["&"]="", ["*"]="",
+}
+
+-- Where the absolute path containing [s,e] starts, or nil if the token that
+-- contains the marker is not an absolute path.
+--
+-- Deliberately NOT a Lua pattern. A pattern that scans leftward is greedy by
+-- construction and there is no way to say "stop at the start of the token"
+-- without enumerating the stop set anyway -- so enumerate it, and walk.
+local function _abs_token_start(content, s)
+    local i = s - 1
+    while i >= 1 do
+        local c = content:sub(i, i)
+        if _PATH_DELIMS[c] then break end
+        i = i - 1
+    end
+    local start = i + 1
+    if content:sub(start, start) ~= "/" then return nil end
+    return start
+end
+
+local function _is_binary(content)
+    -- A NUL in the first 8 KiB. Text files we rewrite (scripts, .pc, linker
+    -- scripts) have none; ELF has one in byte 5. Cheaper and more portable
+    -- than magic-number tables, and wrong only in the safe direction: a
+    -- misjudged binary is skipped, not corrupted.
+    return content:sub(1, 8192):find("\0", 1, true) ~= nil
+end
+
+-- The interpreter to syntax-check a rewritten script with, or nil.
+--
+-- The script's OWN shebang, not a fixed `sh -n`. glibc's `ldd` is
+-- `#! /bin/bash` and uses bash's `$"..."`; checking it with dash would either
+-- reject valid input or accept broken input depending on the host's /bin/sh,
+-- and a check whose verdict depends on the machine is not a check.
+local function _script_checker(filepath, content)
+    local shebang = content:sub(1, 256):match("^#!([^\n]*)")
+    if shebang then
+        local interp = shebang:match("^%s*(%S+)")
+        -- `#!/usr/bin/env bash` names the shell in the argument.
+        if interp and interp:match("env$") then
+            interp = shebang:match("^%s*%S+%s+(%S+)")
+        end
+        if interp then
+            local base = interp:match("([^/]+)$") or interp
+            if base == "sh" or base == "bash" or base == "dash"
+               or base == "ksh" or base == "zsh" or base == "ash" then
+                return base
+            end
+            return nil    -- python, perl, ... not ours to check
+        end
+    end
+    if filepath:sub(-3) == ".sh" then return "sh" end
+    return nil
+end
+
+function M.relocate_build_paths(opt)
+    opt = opt or {}
+    local marker = opt.marker
+    if not marker or marker == "" then
+        error("elfpatch.relocate_build_paths: `marker` is required -- it is "
+              .. "what distinguishes a build path of ours from a legitimate "
+              .. "reference to /usr or /etc")
+    end
+
+    local pkginfo = _LIBXPKG_MODULES and _LIBXPKG_MODULES["pkginfo"]
+    local dir = opt.dir
+    if (not dir or dir == "") and pkginfo then dir = pkginfo.install_dir() end
+    if not dir or dir == "" or not os.isdir(dir) then
+        error("elfpatch.relocate_build_paths: no payload directory to scan ("
+              .. tostring(dir) .. ")")
+    end
+    local to = opt.to
+    if not to or to == "" then to = dir end
+    to = to:gsub("/+$", "")
+
+    local fs = _LIBXPKG_MODULES and _LIBXPKG_MODULES["fs"]
+    if not fs or type(fs.files) ~= "function" then
+        error("elfpatch.relocate_build_paths: this client's libxpkg has no "
+              .. "recursive file walk; cannot enumerate the payload")
+    end
+
+    local files = fs.files(dir, true) or {}
+    local scanned, rewritten, occurrences = 0, 0, 0
+    local touched_scripts = {}
+
+    local is_symlink = type(fs.is_symlink) == "function"
+        and fs.is_symlink or function() return false end
+
+    for _, filepath in ipairs(files) do
+        -- Never through a symlink. fs.files reports a symlink to a regular
+        -- file as a regular file, and rewriting through one would write
+        -- outside the payload -- possibly onto a file another package owns.
+        local f = (not is_symlink(filepath)) and io.open(filepath, "rb") or nil
+        if f then
+            local content = f:read("*a") or ""
+            f:close()
+            scanned = scanned + 1
+            if not _is_binary(content) and content:find(marker, 1, true) then
+                local out, pos, hits = {}, 1, 0
+                while true do
+                    local s, e = content:find(marker, pos, true)
+                    if not s then break end
+                    local tok = _abs_token_start(content, s)
+                    if tok then
+                        out[#out + 1] = content:sub(pos, tok - 1)
+                        out[#out + 1] = to
+                        hits = hits + 1
+                        pos = e + 1
+                    else
+                        -- A relative or already-rewritten occurrence. Copied
+                        -- through untouched: rewriting it would invent an
+                        -- absolute path where the file deliberately has none.
+                        out[#out + 1] = content:sub(pos, e)
+                        pos = e + 1
+                    end
+                end
+                out[#out + 1] = content:sub(pos)
+                local new_content = table.concat(out)
+                if hits > 0 and new_content ~= content then
+                    local w = io.open(filepath, "wb")
+                    if not w then
+                        error("elfpatch.relocate_build_paths: cannot write "
+                              .. filepath)
+                    end
+                    w:write(new_content)
+                    w:close()
+                    rewritten = rewritten + 1
+                    occurrences = occurrences + hits
+                    local checker = _script_checker(filepath, new_content)
+                    if checker then
+                        touched_scripts[#touched_scripts + 1] =
+                            { path = filepath, interp = checker }
+                    end
+                end
+            end
+        end
+    end
+
+    -- ── assert, do not hope (R4) ──────────────────────────────────────
+    --
+    -- Both checks run over the result, not over the intent. The version this
+    -- replaces treated "we wrote something" as success, so "there is still a
+    -- build path in the payload" and "we corrupted the file" produced exactly
+    -- the same output as a clean run: nothing.
+
+    local leftovers = {}
+    for _, filepath in ipairs(files) do
+        local f = (not is_symlink(filepath)) and io.open(filepath, "rb") or nil
+        if f then
+            local content = f:read("*a") or ""
+            f:close()
+            if not _is_binary(content) then
+                -- Every occurrence, not just the first: a file may hold a
+                -- deliberately relative reference and an absolute leftover,
+                -- and checking only the first would pass on the relative one.
+                local pos = 1
+                while true do
+                    local s, e = content:find(marker, pos, true)
+                    if not s then break end
+                    if _abs_token_start(content, s) then
+                        leftovers[#leftovers + 1] = filepath
+                        break
+                    end
+                    pos = e + 1
+                end
+            end
+        end
+    end
+    if #leftovers > 0 then
+        error(string.format(
+            "elfpatch.relocate_build_paths: %d file(s) still contain an "
+            .. "absolute build path matching '%s' after relocation: %s",
+            #leftovers, marker, table.concat(leftovers, ", ")))
+    end
+
+    -- Only where a shell exists to ask. On Windows there is none, and a
+    -- payload of shell scripts is not a Windows payload anyway.
+    if not is_host("windows") then
+        local broken = {}
+        for _, s in ipairs(touched_scripts) do
+            if not _exec_ok(s.interp .. " -n " .. _shell_quote(s.path)) then
+                broken[#broken + 1] = s.path
+            end
+        end
+        if #broken > 0 then
+            error(string.format(
+                "elfpatch.relocate_build_paths: rewriting broke %d shell "
+                .. "script(s) -- they no longer parse: %s",
+                #broken, table.concat(broken, ", ")))
+        end
+    end
+
+    _info(string.format(
+        "relocated %d occurrence(s) of '%s' in %d of %d file(s) -> %s"
+        .. " (%d script(s) re-parsed)",
+        occurrences, marker, rewritten, scanned, to, #touched_scripts))
+
+    return { scanned = scanned, rewritten = rewritten,
+             occurrences = occurrences, scripts = #touched_scripts }
+end
+
+
 return M

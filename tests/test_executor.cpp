@@ -435,6 +435,167 @@ TEST(ExecutorTest, ApplyElfpatchAuto_LinuxUsesPatchelfForElf) {
     fs::remove_all(temp_dir);
 }
 
+// A downloaded prebuilt carries the build machine's absolute paths in its text
+// files. glibc's recipe knew this and rewrote them, and got all three parts of
+// the job wrong -- so this is the shared capability that replaces it.
+//
+// The fixture reproduces the real damage byte for byte. glibc's pattern was
+// `([^%s)]+)/<marker>/lib`, whose `[^%s)]+` runs leftward through anything that
+// is not whitespace or `)`. On the shipped `bin/ldd` it swallowed `RTLDLIST="`
+// along with the path, and the ldd in the 2.39 and 2.44 payloads on disk today
+// does not survive `bash -n`. It also anchored the tail at `/lib`, so the same
+// file's `share/locale` line was left alone -- a build path still in the
+// artifact, which was the only thing the code existed to remove.
+TEST(ExecutorTest, RelocateBuildPaths_AnchorsTheTokenAndAssertsTheResult) {
+#ifdef _WIN32
+    GTEST_SKIP() << "Shell syntax check is POSIX-specific";
+#endif
+
+    const fs::path temp_dir = make_temp_dir("libxpkg-relocate-");
+    const fs::path install_dir = temp_dir / "install";
+    const fs::path pkg_path = temp_dir / "relocate.lua";
+    const std::string marker = "fromsource-x-glibc/2.39";
+    const std::string built = "/home/xlings/.xlings_data/xim/xpkgs/" + marker;
+
+    fs::create_directories(install_dir / "bin");
+    fs::create_directories(install_dir / "lib");
+    fs::create_directories(install_dir / "lib/pkgconfig");
+
+    // The exact two lines that broke, in the order they appear in ldd.
+    write_executable_script(install_dir / "bin/ldd",
+        "#! /bin/bash\n"
+        "TEXTDOMAIN=libc\n"
+        "TEXTDOMAINDIR=" + built + "/share/locale\n"
+        "RTLDLIST=\"" + built + "/lib/ld-linux.so.2 "
+                      + built + "/lib64/ld-linux-x86-64.so.2 "
+                      + built + "/libx32/ld-linux-x32.so.2\"\n"
+        "case \"$1\" in\n"
+        "  --version) printf $\"Copyright (C) %s\\n\" \"2024\" ;;\n"
+        "esac\n");
+
+    // A linker script: the path sits inside parentheses, which the old
+    // pattern's stop set treated specially and this one does not need to.
+    write_text(install_dir / "lib/libc.so",
+        "/* GNU ld script */\n"
+        "GROUP ( " + built + "/lib/libc.so.6 " + built + "/lib/libc_nonshared.a"
+        " AS_NEEDED ( " + built + "/lib/ld-linux-x86-64.so.2 ) )\n");
+
+    // NOT on glibc's six-file list. Enumeration is the point: a list of what
+    // someone thought of is not a measurement of what is there.
+    write_text(install_dir / "lib/pkgconfig/libc.pc",
+        "prefix=" + built + "\n"
+        "libdir=${prefix}/lib\n"
+        "Name: libc\n");
+
+    // A binary holding the same bytes. Rewriting it would change its length
+    // and corrupt it; that is patchelf's job, not a text substitution's.
+    const std::string binary_body = std::string("\x7f", 1) + "ELF" +
+        std::string("\0\0\0\0", 4) + built + "/lib\n";
+    {
+        std::ofstream b(install_dir / "lib/probe.so", std::ios::binary);
+        b.write(binary_body.data(),
+                static_cast<std::streamsize>(binary_body.size()));
+    }
+
+    // A relative reference, already correct. Rewriting it would invent an
+    // absolute path where the file deliberately has none.
+    write_text(install_dir / "lib/relative.txt", "./" + marker + "/lib\n");
+
+    write_text(pkg_path,
+               "package = { spec = \"1\", name = \"relocate\", xpm = { linux = { [\"latest\"] = { ref = \"1.0.0\" }, [\"1.0.0\"] = { url = \"https://example.com/demo.tar.gz\", sha256 = \"0\" } } } }\n"
+               "local elfpatch = import(\"xim.libxpkg.elfpatch\")\n"
+               "local pkginfo = import(\"xim.libxpkg.pkginfo\")\n"
+               "function install()\n"
+               "    elfpatch.relocate_build_paths{ marker = \"" + marker + "\" }\n"
+               "    return true\n"
+               "end\n");
+
+    auto exec = create_executor(pkg_path);
+    ASSERT_TRUE(exec.has_value()) << (exec ? "" : exec.error());
+
+    auto hook_result = exec->run_hook(HookType::Install,
+                                      make_context(install_dir, "linux"));
+    ASSERT_TRUE(hook_result.success) << hook_result.error;
+
+    const auto read = [](const fs::path& p) {
+        std::ifstream in(p, std::ios::binary);
+        std::ostringstream ss; ss << in.rdbuf(); return ss.str();
+    };
+
+    const auto ldd = read(install_dir / "bin/ldd");
+    // The assignment survived. This is the whole regression.
+    EXPECT_NE(ldd.find("RTLDLIST=\""), std::string::npos)
+        << "the shell assignment was swallowed with the path:\n" << ldd;
+    EXPECT_EQ(ldd.find(built), std::string::npos)
+        << "a build path is still in the artifact:\n" << ldd;
+    // All three loader dirs, including the two the /lib anchor mangled.
+    EXPECT_NE(ldd.find(install_dir.string() + "/lib/ld-linux.so.2"),
+              std::string::npos) << ldd;
+    EXPECT_NE(ldd.find(install_dir.string() + "/lib64/ld-linux-x86-64.so.2"),
+              std::string::npos) << ldd;
+    EXPECT_NE(ldd.find(install_dir.string() + "/libx32/ld-linux-x32.so.2"),
+              std::string::npos) << ldd;
+    // The line the /lib anchor never reached.
+    EXPECT_NE(ldd.find(install_dir.string() + "/share/locale"),
+              std::string::npos) << ldd;
+
+    // And it still parses. The payload on disk today does not.
+    EXPECT_EQ(std::system(("bash -n " + (install_dir / "bin/ldd").string()
+                           + " 2>/dev/null").c_str()), 0)
+        << "the rewritten script no longer parses:\n" << ldd;
+
+    const auto libc_so = read(install_dir / "lib/libc.so");
+    EXPECT_EQ(libc_so.find(built), std::string::npos) << libc_so;
+    EXPECT_NE(libc_so.find(install_dir.string() + "/lib/libc.so.6"),
+              std::string::npos) << libc_so;
+    // The closing parens of the linker script survived.
+    EXPECT_NE(libc_so.find(") )"), std::string::npos) << libc_so;
+
+    const auto pc = read(install_dir / "lib/pkgconfig/libc.pc");
+    EXPECT_EQ(pc.find(built), std::string::npos)
+        << "a file that was not on the old hand-written list kept its build "
+           "path:\n" << pc;
+
+    EXPECT_EQ(read(install_dir / "lib/probe.so"), binary_body)
+        << "a binary was rewritten as text";
+    EXPECT_EQ(read(install_dir / "lib/relative.txt"), "./" + marker + "/lib\n")
+        << "a deliberately relative reference was made absolute";
+
+    fs::remove_all(temp_dir);
+}
+
+// The assertion half. A rewrite that corrupts a script must fail the install,
+// not report success -- glibc's version treated "we wrote something" as
+// success, so "still has build paths" and "we broke the file" both produced
+// exactly the output of a clean run: nothing.
+TEST(ExecutorTest, RelocateBuildPaths_FailsWhenAMarkerIsMissing) {
+#ifdef _WIN32
+    GTEST_SKIP() << "Shell syntax check is POSIX-specific";
+#endif
+    const fs::path temp_dir = make_temp_dir("libxpkg-relocate-nomarker-");
+    const fs::path install_dir = temp_dir / "install";
+    const fs::path pkg_path = temp_dir / "relocate.lua";
+    fs::create_directories(install_dir);
+
+    write_text(pkg_path,
+               "package = { spec = \"1\", name = \"relocate\", xpm = { linux = { [\"latest\"] = { ref = \"1.0.0\" }, [\"1.0.0\"] = { url = \"https://example.com/demo.tar.gz\", sha256 = \"0\" } } } }\n"
+               "local elfpatch = import(\"xim.libxpkg.elfpatch\")\n"
+               "function install()\n"
+               "    elfpatch.relocate_build_paths{}\n"
+               "    return true\n"
+               "end\n");
+
+    auto exec = create_executor(pkg_path);
+    ASSERT_TRUE(exec.has_value()) << (exec ? "" : exec.error());
+    auto hook_result = exec->run_hook(HookType::Install,
+                                      make_context(install_dir, "linux"));
+    EXPECT_FALSE(hook_result.success)
+        << "relocation without a marker would rewrite any absolute path in "
+           "the payload, including legitimate references to /usr";
+
+    fs::remove_all(temp_dir);
+}
+
 // patchelf is what stamps INTERP and RPATH onto every payload we ship, so
 // "which patchelf" decides what our artifacts look like -- versions differ in
 // how they grow the dynamic segment and in --force-rpath semantics.

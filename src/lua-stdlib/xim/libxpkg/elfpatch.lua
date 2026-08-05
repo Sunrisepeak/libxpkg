@@ -608,17 +608,37 @@ function M.closure_lib_paths(opt)
         or (_RUNTIME and (_RUNTIME.runtime_deps_list or _RUNTIME.deps_list))
         or {}
     local deps_exports = _RUNTIME and _RUNTIME.deps_exports or {}
+    -- Two sources, both already ABSOLUTE and both decided by the resolver:
+    -- what the dep declared (deps_exports), else what the resolver filled in
+    -- by convention (resolved_deps.libdirs).
+    --
+    -- What used to be here is gone: a branch that took the dep's NAME, asked
+    -- pkginfo to find it again, and tried {lib64, lib} against whatever came
+    -- back. That was a second, independent resolution — and with two versions
+    -- of one package installed it answered differently from the one that
+    -- chose the interpreter, producing a binary whose loader and libc came
+    -- from different payloads. It segfaults before main, and the error names
+    -- a GLIBC_PRIVATE symbol rather than anything about versions.
+    --
+    -- The convention itself did not go away; it moved to the single place
+    -- that is entitled to apply it. See
+    -- xlings/.agents/docs/2026-08-05-dependency-resolution-single-source.md
+    local resolved = (_RUNTIME and type(_RUNTIME.resolved_deps) == "table")
+                     and _RUNTIME.resolved_deps or {}
     for _, dep_spec in ipairs(deps_list) do
         local declared = deps_exports[dep_spec]
+        local rec      = resolved[dep_spec]
         if declared and declared.libdirs and #declared.libdirs > 0 then
             for _, d in ipairs(declared.libdirs) do _push(d) end
-        else
+        elseif rec and rec.libdirs and #rec.libdirs > 0 then
+            for _, d in ipairs(rec.libdirs) do _push(d) end
+        elseif _LIBXPKG_MODULES and _LIBXPKG_MODULES.pkginfo then
+            -- Only a client that predates resolved_deps reaches this. Kept so
+            -- an older xlings keeps working, and warned so the degraded path
+            -- is never silent.
             local dep_name    = dep_spec:gsub("@.*", ""):gsub("^.+:", "")
             local dep_version = dep_spec:find("@", 1, true) and dep_spec:match("@(.+)") or nil
-            local dep_dir
-            if _LIBXPKG_MODULES and _LIBXPKG_MODULES.pkginfo then
-                dep_dir = _LIBXPKG_MODULES.pkginfo.dep_install_dir(dep_name, dep_version)
-            end
+            local dep_dir = _LIBXPKG_MODULES.pkginfo.dep_install_dir(dep_name, dep_version)
             if dep_dir then
                 for _, sub in ipairs({"lib64", "lib"}) do
                     local libdir = path.join(dep_dir, sub)

@@ -54,8 +54,45 @@ local function _iorun(cmd)
     return output
 end
 
--- Find a tool by searching fixed paths then system PATH.
--- Search order: subos/bin → _RUNTIME.bin_dir → system PATH (/usr/bin etc.)
+-- Which package's payload provides each tool.
+--
+-- A tool listed here has a payload answer, and that answer wins. A tool NOT
+-- listed here has no payload by design -- `otool` and `install_name_tool` are
+-- Xcode's, there is no xpkg that could provide them -- so for those the host
+-- is the correct source rather than a fallback, and using it is not reported.
+local _tool_provider = {
+    patchelf = "patchelf",
+    readelf  = "binutils",
+}
+
+-- Find a tool.
+--
+-- Resolution order, and why it is this order:
+--
+--   1. the PAYLOAD  data/xpkgs/<ns>-x-<pkg>/<ver>/bin/<tool>
+--   2. the VIEW     subos/<name>/bin, <home>/bin        (reported)
+--   3. the HOST     /usr/bin, /usr/local/bin, PATH      (reported)
+--
+-- The payload comes first because of R6 (xlings/.agents/docs/
+-- 2026-08-06-subos-architecture-proposal.md §1.5): when xlings itself needs a
+-- tool it must resolve the payload, never the view. The view -- shims under
+-- `subos/<name>/bin` -- is a *selection made by the user*: it is mutable, it
+-- follows `xlings use`, and a shim reached through PATH re-enters xlings and
+-- anchors to whichever home owns the shim.
+--
+-- This is not a stylistic preference. `patchelf` is the tool that stamps
+-- INTERP and RPATH onto every payload we ship, and patchelf versions differ in
+-- how they grow the dynamic segment and in `--force-rpath` semantics. Letting
+-- a mutable view -- with a silent fallback to whatever `/usr/bin/patchelf` the
+-- build machine happens to have -- decide which one runs means the shape of
+-- our artifacts is decided by the environment rather than by us.
+--
+-- The old order was 1) subos bin 2) home bin 3) /usr/bin 4) PATH, with the
+-- payload not a candidate at all. In the default configuration every one of
+-- those resolves to the same file, which is why it survived: the answers agree
+-- by coincidence until a second home, a second version, or a host install of
+-- the tool exists.
+--
 -- Returns { program = "/abs/path/to/tool" } or nil.
 local function _find_tool(toolname)
     if _tool_cache[toolname] ~= nil then
@@ -63,46 +100,68 @@ local function _find_tool(toolname)
         return _tool_cache[toolname]
     end
 
-    local candidates = {}
-
-    -- 1. subos bin (patchelf, readelf live here)
-    local sysroot = _RUNTIME and _RUNTIME.subos_sysrootdir
-    if sysroot and sysroot ~= "" then
-        candidates[#candidates + 1] = path.join(sysroot, "bin", toolname)
+    local function _accept(p, how)
+        local tool = { program = p }
+        if how then
+            -- Not a debug line. Landing here means the artifact about to be
+            -- produced was stamped by a tool we did not choose, and the only
+            -- moment that is observable is now.
+            _warn(string.format(
+                "%s resolved to %s (%s), not to a payload. The package that "
+                .. "provides it (%s) is not in this home's store; declare it "
+                .. "as a build dep to make this deterministic.",
+                toolname, p, how, tostring(_tool_provider[toolname])))
+        else
+            _info("using " .. toolname .. ": " .. p .. " (payload)")
+        end
+        _tool_cache[toolname] = tool
+        return tool
     end
 
-    -- 2. _RUNTIME.bin_dir (~/.xlings/bin)
-    local bin_dir = _RUNTIME and _RUNTIME.bin_dir
-    if bin_dir then
-        candidates[#candidates + 1] = path.join(bin_dir, toolname)
-    end
-
-    -- 3. macOS system tools
-    if is_host("macosx") then
-        candidates[#candidates + 1] = "/usr/bin/" .. toolname
-    end
-
-    -- 4. common system paths
-    candidates[#candidates + 1] = "/usr/bin/" .. toolname
-    candidates[#candidates + 1] = "/usr/local/bin/" .. toolname
-
-    for _, p in ipairs(candidates) do
-        if os.isfile(p) then
-            local tool = { program = p }
-            _info("using " .. toolname .. ": " .. p)
-            _tool_cache[toolname] = tool
-            return tool
+    -- 1. The payload. One answer, immutable, not reachable through any view.
+    --
+    -- type(), not truthiness: on a client whose libxpkg predates
+    -- tool_payload_dir the field is nil here, but the same probe written as
+    -- `if pkginfo.tool_payload_dir then` on a module proxy is true everywhere.
+    local provider = _tool_provider[toolname]
+    if provider then
+        local pkginfo = _LIBXPKG_MODULES and _LIBXPKG_MODULES["pkginfo"]
+        if pkginfo and type(pkginfo.tool_payload_dir) == "function" then
+            local ok, dir = pcall(pkginfo.tool_payload_dir, provider)
+            if ok and dir and dir ~= "" then
+                local exe = path.join(dir, "bin", toolname)
+                if is_host("windows") then exe = exe .. ".exe" end
+                if os.isfile(exe) then return _accept(exe, nil) end
+            end
         end
     end
 
-    -- 5. Last resort: search system PATH via shell
+    -- 2. The view. Kept because a home whose store predates this change still
+    --    has to work, and because a user may deliberately have put a tool
+    --    there -- but it is now reported rather than preferred.
+    local sysroot = _RUNTIME and _RUNTIME.subos_sysrootdir
+    if sysroot and sysroot ~= "" then
+        local p = path.join(sysroot, "bin", toolname)
+        if os.isfile(p) then return _accept(p, "subos view") end
+    end
+
+    local bin_dir = _RUNTIME and _RUNTIME.bin_dir
+    if bin_dir then
+        local p = path.join(bin_dir, toolname)
+        if os.isfile(p) then return _accept(p, "home bin") end
+    end
+
+    -- 3. The host.
+    for _, p in ipairs({ "/usr/bin/" .. toolname, "/usr/local/bin/" .. toolname }) do
+        if os.isfile(p) then
+            return _accept(p, provider and "host" or nil)
+        end
+    end
+
     local which_cmd = is_host("windows") and "where" or "which"
     local resolved = _trim(_iorun(which_cmd .. " " .. _shell_quote(toolname)))
     if resolved and resolved ~= "" and os.isfile(resolved) then
-        local tool = { program = resolved }
-        _info("using " .. toolname .. ": " .. resolved .. " (PATH)")
-        _tool_cache[toolname] = tool
-        return tool
+        return _accept(resolved, provider and "host PATH" or nil)
     end
 
     _warn(toolname .. " not found")

@@ -435,6 +435,161 @@ TEST(ExecutorTest, ApplyElfpatchAuto_LinuxUsesPatchelfForElf) {
     fs::remove_all(temp_dir);
 }
 
+// patchelf is what stamps INTERP and RPATH onto every payload we ship, so
+// "which patchelf" decides what our artifacts look like -- versions differ in
+// how they grow the dynamic segment and in --force-rpath semantics.
+//
+// It used to be decided by a mutable view: subos/<name>/bin first, then the
+// home's bin, then /usr/bin, then PATH, with the payload not a candidate at
+// all. Every one of those resolves to the same file in the default
+// configuration, which is why it survived -- the answers agree by coincidence
+// until a second home, a second version, or a host install exists.
+//
+// Two patchelf binaries here, distinguishable only by what they log. The
+// payload one is not on PATH and not in bin_dir; the view one is both. If the
+// payload does not win, the assertion below fails on the marker.
+// See the architecture proposal's R6 (internal consumers bind the payload).
+TEST(ExecutorTest, FindTool_PrefersPayloadOverViewAndHost) {
+#ifdef _WIN32
+    GTEST_SKIP() << "Tool emulation test is POSIX-specific";
+#endif
+
+    const fs::path temp_dir = make_temp_dir("libxpkg-findtool-payload-");
+    const fs::path store = temp_dir / "xpkgs";
+    const fs::path payload_bin = store / "xim-x-patchelf" / "0.18.0" / "bin";
+    const fs::path view_dir = temp_dir / "tools";
+    const fs::path install_dir = store / "xim-x-findtool" / "1.0.0";
+    const fs::path lib_dir = install_dir / "lib";
+    const fs::path log_path = temp_dir / "tool.log";
+    const fs::path pkg_path = temp_dir / "findtool.lua";
+    const fs::path binary_path = install_dir / "demo-bin";
+
+    fs::create_directories(payload_bin);
+    fs::create_directories(view_dir);
+    fs::create_directories(lib_dir);
+
+    write_executable_script(payload_bin / "patchelf",
+                            "#!/bin/sh\n"
+                            "printf 'PAYLOAD %s\\n' \"$*\" >> \"$ELFPATCH_LOG\"\n");
+    write_executable_script(view_dir / "patchelf",
+                            "#!/bin/sh\n"
+                            "printf 'VIEW %s\\n' \"$*\" >> \"$ELFPATCH_LOG\"\n");
+
+    {
+        std::ofstream binary(binary_path, std::ios::binary);
+        ASSERT_TRUE(binary.good());
+        const unsigned char magic[] = {0x7f, 'E', 'L', 'F', 0, 0, 0, 0};
+        binary.write(reinterpret_cast<const char*>(magic), sizeof(magic));
+    }
+    fs::permissions(binary_path,
+                    fs::perms::owner_read | fs::perms::owner_write | fs::perms::owner_exec,
+                    fs::perm_options::replace);
+
+    write_text(pkg_path,
+               "package = { spec = \"1\", name = \"findtool\", xpm = { linux = { [\"latest\"] = { ref = \"1.0.0\" }, [\"1.0.0\"] = { url = \"https://example.com/demo.tar.gz\", sha256 = \"0\" } } } }\n"
+               "local elfpatch = import(\"xim.libxpkg.elfpatch\")\n"
+               "function install()\n"
+               "    elfpatch.auto({ enable = true })\n"
+               "    return true\n"
+               "end\n");
+
+    const std::string original_path = std::getenv("PATH") ? std::getenv("PATH") : "";
+    ScopedEnvVar path_env("PATH", view_dir.string() + ":" + original_path);
+    ScopedEnvVar log_env("ELFPATCH_LOG", log_path.string());
+
+    auto exec = create_executor(pkg_path);
+    ASSERT_TRUE(exec.has_value()) << (exec ? "" : exec.error());
+
+    auto ctx = make_context(install_dir, "linux", view_dir);
+    ctx.xpkg_dir = store;
+    auto hook_result = exec->run_hook(HookType::Install, ctx);
+    ASSERT_TRUE(hook_result.success) << hook_result.error;
+
+    auto patch_result = exec->apply_elfpatch_auto();
+    EXPECT_TRUE(patch_result.success) << patch_result.error;
+
+    std::ifstream log_file(log_path);
+    std::ostringstream log_buffer;
+    log_buffer << log_file.rdbuf();
+    const std::string log = log_buffer.str();
+
+    EXPECT_NE(log.find("PAYLOAD"), std::string::npos)
+        << "the payload patchelf never ran; log was:\n" << log;
+    EXPECT_EQ(log.find("VIEW"), std::string::npos)
+        << "the view's patchelf ran even though a payload exists. The tool that "
+           "stamps INTERP and RPATH must not be selected by a mutable view.\n"
+           "log was:\n" << log;
+
+    fs::remove_all(temp_dir);
+}
+
+// The other half of the contract: with no payload in the store, the view is
+// still usable. A home whose store predates this change has to keep working --
+// the change is which answer WINS, not the removal of the others.
+TEST(ExecutorTest, FindTool_FallsBackToViewWhenNoPayloadExists) {
+#ifdef _WIN32
+    GTEST_SKIP() << "Tool emulation test is POSIX-specific";
+#endif
+
+    const fs::path temp_dir = make_temp_dir("libxpkg-findtool-fallback-");
+    const fs::path store = temp_dir / "xpkgs";
+    const fs::path view_dir = temp_dir / "tools";
+    const fs::path install_dir = store / "xim-x-findtool" / "1.0.0";
+    const fs::path lib_dir = install_dir / "lib";
+    const fs::path log_path = temp_dir / "tool.log";
+    const fs::path pkg_path = temp_dir / "findtool.lua";
+    const fs::path binary_path = install_dir / "demo-bin";
+
+    fs::create_directories(view_dir);
+    fs::create_directories(lib_dir);
+
+    write_executable_script(view_dir / "patchelf",
+                            "#!/bin/sh\n"
+                            "printf 'VIEW %s\\n' \"$*\" >> \"$ELFPATCH_LOG\"\n");
+
+    {
+        std::ofstream binary(binary_path, std::ios::binary);
+        ASSERT_TRUE(binary.good());
+        const unsigned char magic[] = {0x7f, 'E', 'L', 'F', 0, 0, 0, 0};
+        binary.write(reinterpret_cast<const char*>(magic), sizeof(magic));
+    }
+    fs::permissions(binary_path,
+                    fs::perms::owner_read | fs::perms::owner_write | fs::perms::owner_exec,
+                    fs::perm_options::replace);
+
+    write_text(pkg_path,
+               "package = { spec = \"1\", name = \"findtool\", xpm = { linux = { [\"latest\"] = { ref = \"1.0.0\" }, [\"1.0.0\"] = { url = \"https://example.com/demo.tar.gz\", sha256 = \"0\" } } } }\n"
+               "local elfpatch = import(\"xim.libxpkg.elfpatch\")\n"
+               "function install()\n"
+               "    elfpatch.auto({ enable = true })\n"
+               "    return true\n"
+               "end\n");
+
+    const std::string original_path = std::getenv("PATH") ? std::getenv("PATH") : "";
+    ScopedEnvVar path_env("PATH", view_dir.string() + ":" + original_path);
+    ScopedEnvVar log_env("ELFPATCH_LOG", log_path.string());
+
+    auto exec = create_executor(pkg_path);
+    ASSERT_TRUE(exec.has_value()) << (exec ? "" : exec.error());
+
+    auto ctx = make_context(install_dir, "linux", view_dir);
+    ctx.xpkg_dir = store;
+    auto hook_result = exec->run_hook(HookType::Install, ctx);
+    ASSERT_TRUE(hook_result.success) << hook_result.error;
+
+    auto patch_result = exec->apply_elfpatch_auto();
+    EXPECT_TRUE(patch_result.success) << patch_result.error;
+
+    std::ifstream log_file(log_path);
+    std::ostringstream log_buffer;
+    log_buffer << log_file.rdbuf();
+    const std::string log = log_buffer.str();
+    EXPECT_NE(log.find("VIEW"), std::string::npos)
+        << "no payload and no view means no patching at all; log was:\n" << log;
+
+    fs::remove_all(temp_dir);
+}
+
 // Regression: patchelf 0.18.0 corrupts compact ELFs (e.g. ninja 1.12.1
 // at 273 KB) when --set-interpreter runs before --set-rpath. The interp
 // op extends PT_LOAD and shifts the dynamic section; the subsequent

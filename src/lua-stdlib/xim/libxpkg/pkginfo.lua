@@ -261,6 +261,28 @@ function M.install_dir(pkgname, pkgversion)
     return nil
 end
 
+-- The payload of a tool libxpkg ITSELF needs, e.g. patchelf for elfpatch.
+--
+-- Same resolution as dep_install_dir, one difference in diagnostics: a missing
+-- resolver record is not reported. That warning exists because a *dependency*
+-- of the package being installed should have been resolved by the resolver, so
+-- its absence means the client predates resolved_deps. A tool of libxpkg is not
+-- a dependency of the package being installed -- nothing should have recorded
+-- it -- so the same warning here would be a false report on every install, and
+-- one the user cannot act on.
+--
+-- Returns the install_dir, or nil. Callers must handle nil: on a home where the
+-- tool's package is not installed there is no payload answer, and inventing one
+-- is exactly the failure this function exists to prevent.
+function M.tool_payload_dir(tool_pkg, tool_version)
+    if not tool_pkg or tool_pkg == "" then return nil end
+    local rec = M.resolved_dep(tool_pkg, tool_version)
+    if rec and rec.install_dir and rec.install_dir ~= "" then
+        return rec.install_dir
+    end
+    return _resolve_dep_via_scan(tool_pkg, tool_version)
+end
+
 -- ─────────────────────────────────────────────────────────────────────
 -- build_dep API
 -- ─────────────────────────────────────────────────────────────────────

@@ -582,6 +582,91 @@ TEST(ExecutorTest, HostLinkInterposer_RefusesAnEmptyClosure) {
 // exactly as successfully as one NEEDing nothing, and the caller reports "no
 // device" -- a machine without this driver must fail at install, where the
 // message can say so.
+// The vendor's OWN dependency closure has to be checked, not just the shape of
+// the object we made.
+//
+// The three assertions that were here (soname / needed / rpath present) can all
+// hold while the interposer does nothing useful: an RPATH naming directories
+// that do not contain the vendor's DT_NEEDED resolves them from the host, which
+// still renders -- on llvmpipe -- and says nothing. Warn rather than fail: the
+// object IS correctly built and the host's ld.so.cache makes it work outside a
+// sandbox, so refusing would break a working install. Being invisible is the
+// defect.
+TEST(ExecutorTest, HostLinkInterposer_ReportsAnUnservedVendorClosure) {
+#ifdef _WIN32
+    GTEST_SKIP() << "ELF-specific";
+#endif
+    const fs::path temp_dir = make_temp_dir("libxpkg-interposer-closure-");
+    const fs::path install_dir = temp_dir / "install";
+    const fs::path libdir = install_dir / "lib";
+    const fs::path pkg_path = temp_dir / "interposer.lua";
+    const fs::path stub = temp_dir / "stub.so";
+    const fs::path vendor = temp_dir / "libFAKE_vendor.so.550";
+    const fs::path tools = temp_dir / "tools";
+    const fs::path served = temp_dir / "served";
+    fs::create_directories(libdir);
+    fs::create_directories(tools);
+    fs::create_directories(served);
+
+    // One of the two SONAMEs the vendor needs is present in the closure; the
+    // other is not. A fraction, so a pass cannot be produced by an empty list.
+    write_text(served / "libserved.so.1", "x\n");
+
+    // A fake patchelf that answers --print-needed differently for the VENDOR
+    // than for the object under construction. The previous fake could not tell
+    // them apart, which is exactly why this check could not have been tested
+    // with it.
+    write_executable_script(tools / "patchelf",
+        "#!/bin/sh\n"
+        "printf 'patchelf %s\\n' \"$*\" >> \"$ELFPATCH_LOG\"\n"
+        "case \"$1\" in\n"
+        "  --set-soname) echo \"$2\" > \"$ELFPATCH_STATE.soname\" ;;\n"
+        "  --add-needed) echo \"$2\" >> \"$ELFPATCH_STATE.needed\" ;;\n"
+        "  --set-rpath)  echo \"$2\" > \"$ELFPATCH_STATE.rpath\" ;;\n"
+        "  --print-soname) cat \"$ELFPATCH_STATE.soname\" 2>/dev/null ;;\n"
+        "  --print-needed)\n"
+        "     case \"$2\" in\n"
+        "       *libFAKE_vendor.so.550) printf 'libserved.so.1\\nlibmissing.so.7\\n' ;;\n"
+        "       *) cat \"$ELFPATCH_STATE.needed\" 2>/dev/null ;;\n"
+        "     esac ;;\n"
+        "  --print-rpath)  cat \"$ELFPATCH_STATE.rpath\"  2>/dev/null ;;\n"
+        "esac\n"
+        "exit 0\n");
+
+    write_text(stub, "\x7f" "ELF-stub-placeholder\n");
+    write_text(vendor, "\x7f" "ELF-vendor-placeholder\n");
+
+    write_text(pkg_path,
+        "package = { spec = \"1\", name = \"interposer\", xpm = { linux = { [\"latest\"] = { ref = \"1.0.0\" }, [\"1.0.0\"] = { url = \"https://example.com/d.tar.gz\", sha256 = \"0\" } } } }\n"
+        "local elfpatch = import(\"xim.libxpkg.elfpatch\")\n"
+        "function install()\n"
+        "    local r = elfpatch.host_link_interposer{\n"
+        "        vendor  = \"" + vendor.string() + "\",\n"
+        "        out     = \"" + (libdir / "libFAKE_vendor.so.0").string() + "\",\n"
+        "        stub    = \"" + stub.string() + "\",\n"
+        "        libdirs = { \"" + served.string() + "\" },\n"
+        "    }\n"
+        "    assert(#r.unresolved == 1, \"expected one unresolved dep\")\n"
+        "    assert(r.unresolved[1] == \"libmissing.so.7\", r.unresolved[1])\n"
+        "    return true\n"
+        "end\n");
+
+    const std::string original_path = std::getenv("PATH") ? std::getenv("PATH") : "";
+    ScopedEnvVar path_env("PATH", tools.string() + ":" + original_path);
+    ScopedEnvVar log_env("ELFPATCH_LOG", (temp_dir / "log.txt").string());
+    ScopedEnvVar st_env("ELFPATCH_STATE", (temp_dir / "state").string());
+
+    auto exec = create_executor(pkg_path);
+    ASSERT_TRUE(exec.has_value()) << (exec ? "" : exec.error());
+    auto ctx = make_context(install_dir, "linux", tools);
+    auto hook_result = exec->run_hook(HookType::Install, ctx);
+    // The install SUCCEEDS -- the unresolved entry is reported, not fatal.
+    ASSERT_TRUE(hook_result.success) << hook_result.error;
+    EXPECT_TRUE(fs::exists(libdir / "libFAKE_vendor.so.0"));
+
+    fs::remove_all(temp_dir);
+}
+
 // `install_dir` for a package that is not a dependency here must SAY that.
 //
 // openxlings/xlings#487: a macOS install of ollama reported "cannot get

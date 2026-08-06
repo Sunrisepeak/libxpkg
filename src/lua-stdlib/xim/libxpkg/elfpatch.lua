@@ -1531,6 +1531,45 @@ function M.host_link_interposer(opt)
               .. "that the package declares its runtime deps.")
     end
 
+    -- The SUBOS view first, the version-pinned payload directories after it.
+    --
+    -- closure_lib_paths returns the payloads the resolver chose, each an exact
+    -- version directory (`.../libX11/1.8.10/lib`), with the subos lib directory
+    -- LAST. Written into an ELF that ordering is a snapshot: upgrade libX11 and
+    -- every entry above still names 1.8.10, and once that payload is collected
+    -- the entry is a dead directory the loader walks past.
+    --
+    -- The subos lib directory is the one name that does not move. It is a
+    -- symlink farm the packages themselves declare into, so it tracks `xlings
+    -- use` and re-points on upgrade -- the same role /run/opengl-driver plays on
+    -- NixOS, /overrides in pressure-vessel and $SNAP/gpu-2404 in a snap. Every
+    -- ecosystem that has to hand a foreign driver a search path converged on a
+    -- stable indirection directory, and we already had one at the wrong end of
+    -- the list.
+    --
+    -- The payload directories STAY, as the fallback. The recipe's own concern is
+    -- real -- installed into a subos that is short of libX11, the farm would be
+    -- quietly missing it -- and with this order the farm answers first while the
+    -- payloads still answer at all. The closure assertion below is what turns
+    -- "quietly missing" into a named failure either way.
+    -- `subos_sysrootdir` is the subos root; its `lib` is the farm that
+    -- `sysroot.declare_libs` (and xvm's `lib` node kind) fill. Read from
+    -- _RUNTIME rather than re-derived from a path in `libdirs`: the last entry
+    -- being the subos directory is a property of closure_lib_paths, not a
+    -- contract, and inferring it would break silently if that changed.
+    local subosdir = nil
+    if _RUNTIME and _RUNTIME.subos_sysrootdir
+       and _RUNTIME.subos_sysrootdir ~= "" then
+        subosdir = path.join(_RUNTIME.subos_sysrootdir, "lib")
+    end
+    if subosdir and os.isdir(subosdir) then
+        local reordered, seen = { subosdir }, { [subosdir] = true }
+        for _, d in ipairs(libdirs) do
+            if not seen[d] then seen[d] = true; table.insert(reordered, d) end
+        end
+        libdirs = reordered
+    end
+
     local tool = _find_tool("patchelf")
     if not tool then
         error("elfpatch.host_link_interposer: patchelf not found")
@@ -1582,9 +1621,57 @@ function M.host_link_interposer(opt)
               .. " -- the vendor's dependencies would resolve from the host")
     end
 
+    -- And the assertion those three were missing: does the RPATH actually
+    -- SERVE the vendor?
+    --
+    -- The three above check the shape of the object we made. All three can hold
+    -- while the thing the object exists for does not work: an RPATH naming
+    -- directories that do not contain the vendor's DT_NEEDED resolves them from
+    -- the host instead, which still renders -- on llvmpipe -- and prints
+    -- nothing. That is this repository's recurring failure shape, and it was
+    -- sitting inside the function written to prevent it.
+    --
+    -- Resolved the way the loader would, not by trusting a list: for each of the
+    -- vendor's DT_NEEDED entries, look for that exact name in the RPATH
+    -- directories in order. Bare SONAMEs only -- an absolute DT_NEEDED needs no
+    -- search, and libc/libm come from the same closure as everything else.
+    local vneeded = _iorun(_shell_quote(tool.program) .. " --print-needed "
+                           .. _shell_quote(vendor)) or ""
+    local missing, vtotal = {}, 0
+    for line in vneeded:gmatch("[^\n]+") do
+        local name = _trim(line)
+        if name ~= "" and not name:find("^/") then
+            vtotal = vtotal + 1
+            local found = false
+            for _, d in ipairs(libdirs) do
+                if os.isfile(path.join(d, name)) then found = true; break end
+            end
+            if not found then table.insert(missing, name) end
+        end
+    end
+    if #missing > 0 then
+        -- A warning, not an error, and the line between them is what this
+        -- ecosystem's convention says: the interposer IS correctly built, and on
+        -- a normal host the loader will find these through its own ld.so cache
+        -- and the result works. Refusing would break a working install. What
+        -- must not happen is that it is INVISIBLE -- inside a sandbox or an
+        -- empty-host container there is no cache to fall back to, and the
+        -- failure then appears as `no device` from a GL call three layers away.
+        _warn(string.format(
+            "interposer %s: %d of the vendor's dependencies are not in the "
+            .. "payload closure and will resolve from the HOST: %s. GL will "
+            .. "work here and fail in a sandbox with no /etc/ld.so.cache. "
+            .. "Declare the missing providers as runtime deps of this package.",
+            soname, #missing, table.concat(missing, ", ")))
+    end
+
+    -- The fraction, not a bare "built". `interposer X -> Y` was true in every
+    -- case above including the one where nothing the vendor needs is reachable.
     _info(string.format(
-        "interposer %s -> %s (%d closure dir(s))", soname, vendor, #libdirs))
-    return { out = out, soname = soname, vendor = vendor, libdirs = libdirs }
+        "interposer %s -> %s (%d closure dir(s), vendor deps resolved %d/%d)",
+        soname, vendor, #libdirs, vtotal - #missing, vtotal))
+    return { out = out, soname = soname, vendor = vendor, libdirs = libdirs,
+             unresolved = missing }
 end
 
 return M

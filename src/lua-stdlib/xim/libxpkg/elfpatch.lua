@@ -1198,14 +1198,20 @@ local _PATH_DELIMS = {
 -- Deliberately NOT a Lua pattern. A pattern that scans leftward is greedy by
 -- construction and there is no way to say "stop at the start of the token"
 -- without enumerating the stop set anyway -- so enumerate it, and walk.
-local function _abs_token_start(content, s)
+-- `floor` bounds the walk at the first byte not yet emitted. Without it a
+-- marker occurring TWICE inside one path token would walk back past the
+-- previous match, and `content:sub(pos, tok - 1)` would then be empty --
+-- silently deleting everything between the two occurrences.
+local function _abs_token_start(content, s, floor)
+    floor = floor or 1
     local i = s - 1
-    while i >= 1 do
+    while i >= floor do
         local c = content:sub(i, i)
         if _PATH_DELIMS[c] then break end
         i = i - 1
     end
     local start = i + 1
+    if start < floor then return nil end
     if content:sub(start, start) ~= "/" then return nil end
     return start
 end
@@ -1292,7 +1298,7 @@ function M.relocate_build_paths(opt)
                 while true do
                     local s, e = content:find(marker, pos, true)
                     if not s then break end
-                    local tok = _abs_token_start(content, s)
+                    local tok = _abs_token_start(content, s, pos)
                     if tok then
                         out[#out + 1] = content:sub(pos, tok - 1)
                         out[#out + 1] = to
@@ -1368,11 +1374,26 @@ function M.relocate_build_paths(opt)
     -- Only where a shell exists to ask. On Windows there is none, and a
     -- payload of shell scripts is not a Windows payload anyway.
     if not is_host("windows") then
-        local broken = {}
+        local broken, unchecked = {}, {}
+        local have = {}
         for _, s in ipairs(touched_scripts) do
-            if not _exec_ok(s.interp .. " -n " .. _shell_quote(s.path)) then
+            if have[s.interp] == nil then
+                have[s.interp] = _exec_ok("command -v " .. _shell_quote(s.interp))
+            end
+            if not have[s.interp] then
+                -- Not a failure. `_exec_ok` cannot tell "syntax error" from
+                -- "command not found", and failing an install because the
+                -- machine has no zsh would be a check inventing a defect.
+                unchecked[#unchecked + 1] = s.path .. " (no " .. s.interp .. ")"
+            elseif not _exec_ok(s.interp .. " -n " .. _shell_quote(s.path)) then
                 broken[#broken + 1] = s.path
             end
+        end
+        if #unchecked > 0 then
+            _warn(string.format(
+                "rewrote %d script(s) whose interpreter is not on this machine, "
+                .. "so they were not re-parsed: %s",
+                #unchecked, table.concat(unchecked, ", ")))
         end
         if #broken > 0 then
             error(string.format(

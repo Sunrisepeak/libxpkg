@@ -435,6 +435,185 @@ TEST(ExecutorTest, ApplyElfpatchAuto_LinuxUsesPatchelfForElf) {
     fs::remove_all(temp_dir);
 }
 
+// A driver vendor library is the host's file: a symlink into /usr/lib, coupled
+// to the host's kernel module, and not ours to put an RPATH on. The historical
+// answer was to put OUR libraries on LD_LIBRARY_PATH so the vendor could find
+// its dependencies -- which also handed them to every other process in the
+// subos, including host binaries on the host loader. That is how
+// `xlings subos use` once returned a /bin/bash that died of SIGSEGV before
+// printing a character.
+//
+// host_link_interposer does the same job with a scope of exactly one object.
+// Measured on a real NVIDIA stack on 2026-08-06: with LD_LIBRARY_PATH carrying
+// only the host driver directory, GL_RENDERER came back as the RTX 4080 and
+// the probe read back the pixel it drew; the same subos without it renders on
+// llvmpipe.
+//
+// These cover the SHAPE of the produced object. Each of the three assertions
+// below exists because its absence produces an interposer that loads perfectly
+// and does nothing: a wrong SONAME is never asked for, a missing NEEDED leaves
+// dlsym with no entry point (the caller reports "no device", not an error),
+// and DT_RUNPATH instead of DT_RPATH is not transitive so the vendor's own
+// dependencies fall through to the host.
+TEST(ExecutorTest, HostLinkInterposer_ShapeIsAssertedNotAssumed) {
+#ifdef _WIN32
+    GTEST_SKIP() << "ELF-specific";
+#endif
+    const fs::path temp_dir = make_temp_dir("libxpkg-interposer-");
+    const fs::path install_dir = temp_dir / "install";
+    const fs::path libdir = install_dir / "lib";
+    const fs::path tools = temp_dir / "tools";
+    const fs::path log_path = temp_dir / "tool.log";
+    const fs::path pkg_path = temp_dir / "interposer.lua";
+    const fs::path stub = temp_dir / "stub.so";
+    const fs::path vendor = temp_dir / "libFAKE_vendor.so.550";
+
+    fs::create_directories(libdir);
+    fs::create_directories(tools);
+
+    // A fake patchelf that records its arguments and answers the three
+    // --print-* queries from what it was told to set. That is enough to prove
+    // the call sequence and that the result is CHECKED; whether real patchelf
+    // writes a valid ELF is real patchelf's business.
+    write_executable_script(tools / "patchelf",
+        "#!/bin/sh\n"
+        "printf 'patchelf %s\\n' \"$*\" >> \"$ELFPATCH_LOG\"\n"
+        "case \"$1\" in\n"
+        "  --set-soname) echo \"$2\" > \"$ELFPATCH_STATE.soname\" ;;\n"
+        "  --add-needed) echo \"$2\" >> \"$ELFPATCH_STATE.needed\" ;;\n"
+        "  --set-rpath)  echo \"$2\" > \"$ELFPATCH_STATE.rpath\" ;;\n"
+        "  --print-soname) cat \"$ELFPATCH_STATE.soname\" 2>/dev/null ;;\n"
+        "  --print-needed) cat \"$ELFPATCH_STATE.needed\" 2>/dev/null ;;\n"
+        "  --print-rpath)  cat \"$ELFPATCH_STATE.rpath\"  2>/dev/null ;;\n"
+        "esac\n"
+        "exit 0\n");
+
+    write_text(stub, "\x7f" "ELF-stub-placeholder\n");
+    write_text(vendor, "\x7f" "ELF-vendor-placeholder\n");
+
+    write_text(pkg_path,
+        "package = { spec = \"1\", name = \"interposer\", xpm = { linux = { [\"latest\"] = { ref = \"1.0.0\" }, [\"1.0.0\"] = { url = \"https://example.com/d.tar.gz\", sha256 = \"0\" } } } }\n"
+        "local elfpatch = import(\"xim.libxpkg.elfpatch\")\n"
+        "function install()\n"
+        "    elfpatch.host_link_interposer{\n"
+        "        vendor  = \"" + vendor.string() + "\",\n"
+        "        out     = \"" + (libdir / "libFAKE_vendor.so.0").string() + "\",\n"
+        "        stub    = \"" + stub.string() + "\",\n"
+        "        libdirs = { \"/payload/a/lib\", \"/payload/b/lib64\" },\n"
+        "    }\n"
+        "    return true\n"
+        "end\n");
+
+    const std::string original_path = std::getenv("PATH") ? std::getenv("PATH") : "";
+    ScopedEnvVar path_env("PATH", tools.string() + ":" + original_path);
+    ScopedEnvVar log_env("ELFPATCH_LOG", log_path.string());
+    ScopedEnvVar st_env("ELFPATCH_STATE", (temp_dir / "state").string());
+
+    auto exec = create_executor(pkg_path);
+    ASSERT_TRUE(exec.has_value()) << (exec ? "" : exec.error());
+    auto ctx = make_context(install_dir, "linux", tools);
+    auto hook_result = exec->run_hook(HookType::Install, ctx);
+    ASSERT_TRUE(hook_result.success) << hook_result.error;
+
+    EXPECT_TRUE(fs::exists(libdir / "libFAKE_vendor.so.0"))
+        << "the interposer was not produced";
+
+    std::ifstream lf(log_path);
+    std::ostringstream lb; lb << lf.rdbuf();
+    const std::string log = lb.str();
+
+    // The SONAME is the vendor's, so whoever asks for it gets this instead.
+    EXPECT_NE(log.find("--set-soname libFAKE_vendor.so.0"), std::string::npos)
+        << log;
+    // The real vendor by ABSOLUTE path -- dlsym searches the handle's whole
+    // dependency tree, which is how glvnd still reaches the real entry points.
+    EXPECT_NE(log.find("--add-needed " + vendor.string()), std::string::npos)
+        << log;
+    // --force-rpath, not RUNPATH. DT_RPATH is transitive along the load chain
+    // and DT_RUNPATH is not; that difference is the whole mechanism.
+    EXPECT_NE(log.find("--set-rpath /payload/a/lib:/payload/b/lib64"),
+              std::string::npos) << log;
+    EXPECT_NE(log.find("--force-rpath"), std::string::npos) << log;
+
+    fs::remove_all(temp_dir);
+}
+
+// An empty closure means the vendor's dependencies would resolve from the
+// HOST, which is the single thing this function exists to prevent. Failing the
+// install is the only outcome that is not a silent success: the interposer
+// would load, the GPU would work by accident, and every library it pulled in
+// would be the host's.
+TEST(ExecutorTest, HostLinkInterposer_RefusesAnEmptyClosure) {
+#ifdef _WIN32
+    GTEST_SKIP() << "ELF-specific";
+#endif
+    const fs::path temp_dir = make_temp_dir("libxpkg-interposer-empty-");
+    const fs::path install_dir = temp_dir / "install";
+    const fs::path pkg_path = temp_dir / "interposer.lua";
+    const fs::path stub = temp_dir / "stub.so";
+    const fs::path vendor = temp_dir / "libFAKE_vendor.so.550";
+    fs::create_directories(install_dir);
+    write_text(stub, "stub\n");
+    write_text(vendor, "vendor\n");
+
+    write_text(pkg_path,
+        "package = { spec = \"1\", name = \"interposer\", xpm = { linux = { [\"latest\"] = { ref = \"1.0.0\" }, [\"1.0.0\"] = { url = \"https://example.com/d.tar.gz\", sha256 = \"0\" } } } }\n"
+        "local elfpatch = import(\"xim.libxpkg.elfpatch\")\n"
+        "function install()\n"
+        "    elfpatch.host_link_interposer{\n"
+        "        vendor = \"" + vendor.string() + "\",\n"
+        "        out    = \"" + (install_dir / "x.so").string() + "\",\n"
+        "        stub   = \"" + stub.string() + "\",\n"
+        "        libdirs = {},\n"
+        "    }\n"
+        "    return true\n"
+        "end\n");
+
+    auto exec = create_executor(pkg_path);
+    ASSERT_TRUE(exec.has_value()) << (exec ? "" : exec.error());
+    auto r = exec->run_hook(HookType::Install, make_context(install_dir, "linux"));
+    EXPECT_FALSE(r.success)
+        << "an empty closure resolves the vendor's dependencies from the host";
+
+    fs::remove_all(temp_dir);
+}
+
+// A vendor that is not there. An interposer NEEDing a missing file loads
+// exactly as successfully as one NEEDing nothing, and the caller reports "no
+// device" -- a machine without this driver must fail at install, where the
+// message can say so.
+TEST(ExecutorTest, HostLinkInterposer_RefusesAMissingVendor) {
+#ifdef _WIN32
+    GTEST_SKIP() << "ELF-specific";
+#endif
+    const fs::path temp_dir = make_temp_dir("libxpkg-interposer-novendor-");
+    const fs::path install_dir = temp_dir / "install";
+    const fs::path pkg_path = temp_dir / "interposer.lua";
+    const fs::path stub = temp_dir / "stub.so";
+    fs::create_directories(install_dir);
+    write_text(stub, "stub\n");
+
+    write_text(pkg_path,
+        "package = { spec = \"1\", name = \"interposer\", xpm = { linux = { [\"latest\"] = { ref = \"1.0.0\" }, [\"1.0.0\"] = { url = \"https://example.com/d.tar.gz\", sha256 = \"0\" } } } }\n"
+        "local elfpatch = import(\"xim.libxpkg.elfpatch\")\n"
+        "function install()\n"
+        "    elfpatch.host_link_interposer{\n"
+        "        vendor = \"" + (temp_dir / "does-not-exist.so").string() + "\",\n"
+        "        out    = \"" + (install_dir / "x.so").string() + "\",\n"
+        "        stub   = \"" + stub.string() + "\",\n"
+        "        libdirs = { \"/p/lib\" },\n"
+        "    }\n"
+        "    return true\n"
+        "end\n");
+
+    auto exec = create_executor(pkg_path);
+    ASSERT_TRUE(exec.has_value()) << (exec ? "" : exec.error());
+    auto r = exec->run_hook(HookType::Install, make_context(install_dir, "linux"));
+    EXPECT_FALSE(r.success) << "an interposer pointing at a missing vendor";
+
+    fs::remove_all(temp_dir);
+}
+
 // A downloaded prebuilt carries the build machine's absolute paths in its text
 // files. glibc's recipe knew this and rewrote them, and got all three parts of
 // the job wrong -- so this is the shared capability that replaces it.

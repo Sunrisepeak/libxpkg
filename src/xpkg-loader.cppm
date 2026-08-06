@@ -263,24 +263,56 @@ PlatformMatrix parse_xpm(lua::State* L, int pkg_idx) {
             lua::getfield(L, plat_idx, "deps");
             if (lua::type(L, -1) == lua::TTABLE) {
                 int deps_idx = lua::gettop(L);
-                // Detect shape: if rawlen > 0 OR the first numeric key
-                // exists, treat as array (legacy). Otherwise treat as
-                // a {runtime = ..., build = ...} table.
+                // Three shapes, and the third one used to be silently wrong.
+                //
+                //   deps = { "a", "b" }                    array   → both
+                //   deps = { runtime = {...}, build = {...} }  table   → split
+                //   deps = { "a", "b", build = {...} }     MIXED   → see below
+                //
+                // The mixed shape is what an author writes when they have a
+                // list of runtime deps and want to add one build-time tool.
+                // It parses, it reads exactly like the split form, and the
+                // old code took the array branch on it: `build` was dropped
+                // on the floor and the ARRAY entries were copied into
+                // build_deps instead. Measured 2026-08-06 on
+                // nvidia-gl-host-link -- `deps.build = {"xim:patchelf"}`
+                // alongside five runtime deps installed no patchelf, and
+                // nothing said so.
+                //
+                // Now: an author who writes `runtime`/`build` at all has
+                // opted into the split, so honour it, and fold the array part
+                // into runtime (which is what a list beside `build = {...}`
+                // can only mean). Array-only keeps the legacy fan-out
+                // untouched -- every existing recipe is that shape.
                 int len = static_cast<int>(lua::rawlen(L, deps_idx));
-                bool looks_like_array = len > 0;
-                if (looks_like_array) {
+
+                lua::getfield(L, deps_idx, "runtime");
+                bool has_runtime_key = lua::type(L, -1) == lua::TTABLE;
+                auto rt_key = parse_string_array(lua::gettop(L));
+                lua::pop(L, 1);
+
+                lua::getfield(L, deps_idx, "build");
+                bool has_build_key = lua::type(L, -1) == lua::TTABLE;
+                auto bd = parse_string_array(lua::gettop(L));
+                lua::pop(L, 1);
+
+                bool split = has_runtime_key || has_build_key;
+
+                if (!split) {
                     auto v = parse_string_array(deps_idx);
                     xpm.runtime_deps[platform] = v;
                     xpm.build_deps[platform]   = v;
                     xpm.deps[platform]         = v;
                 } else {
-                    lua::getfield(L, deps_idx, "runtime");
-                    auto rt = parse_string_array(lua::gettop(L));
-                    lua::pop(L, 1);
-
-                    lua::getfield(L, deps_idx, "build");
-                    auto bd = parse_string_array(lua::gettop(L));
-                    lua::pop(L, 1);
+                    auto rt = rt_key;
+                    if (len > 0) {
+                        // The array part of a mixed table: runtime deps
+                        // written positionally, with `build` beside them.
+                        auto arr = parse_string_array(deps_idx);
+                        for (auto& d : arr)
+                            if (std::find(rt.begin(), rt.end(), d) == rt.end())
+                                rt.push_back(d);
+                    }
 
                     xpm.runtime_deps[platform] = rt;
                     xpm.build_deps[platform]   = bd;

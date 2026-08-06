@@ -160,6 +160,35 @@ TEST(LoaderTest, LoadPackage_DepsLegacy_FansOutToBoth) {
     EXPECT_EQ(un->second, expected);
 }
 
+// Mixed form: a positional runtime list WITH `build = {...}` beside it.
+//
+// This is the shape that silently lost its build deps before 0.0.52: `deps`
+// had a non-empty array part, so the loader took the legacy branch, dropped
+// `build`, and copied the array into build_deps. Both halves have to be
+// asserted -- checking only that build_deps contains patchelf would still
+// pass if the array were also being fanned out into it.
+TEST(LoaderTest, LoadPackage_DepsMixed_ArrayIsRuntimeAndBuildSurvives) {
+    auto result = load_package(PKGINDEX / "pkgs/d/depsmixed.lua");
+    ASSERT_TRUE(result.has_value()) << result.error();
+
+    auto& xpm = result->xpm;
+    auto rt = xpm.runtime_deps.find("linux");
+    auto bd = xpm.build_deps.find("linux");
+    auto un = xpm.deps.find("linux");
+    ASSERT_NE(rt, xpm.runtime_deps.end());
+    ASSERT_NE(bd, xpm.build_deps.end());
+    ASSERT_NE(un, xpm.deps.end());
+
+    std::vector<std::string> expectedRt{"node", "npm"};
+    std::vector<std::string> expectedBd{"patchelf"};
+    EXPECT_EQ(rt->second, expectedRt);
+    EXPECT_EQ(bd->second, expectedBd)
+        << "build = {...} beside an array was dropped, or the array leaked into build_deps";
+
+    std::vector<std::string> expectedUnion{"node", "npm", "patchelf"};
+    EXPECT_EQ(un->second, expectedUnion);
+}
+
 // Split form: deps = { runtime = {...}, build = {...} } must keep
 // the two lists separate, and the legacy `deps` field must hold
 // their union (preserving insertion order: runtime first, then build).

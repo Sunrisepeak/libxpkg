@@ -1413,4 +1413,178 @@ function M.relocate_build_paths(opt)
 end
 
 
+-- ─────────────────────────────────────────────────────────────────────
+-- host_link_interposer
+-- ─────────────────────────────────────────────────────────────────────
+--
+-- A driver vendor library belongs to the HOST: it is a symlink into
+-- /usr/lib/..., it must match the host's kernel module, and we cannot put an
+-- RPATH on it because it is not our file. So when it is dlopen'd into one of
+-- our processes, its own DT_NEEDED entries have three possible fates:
+--
+--   1. the SONAME is already loaded  -> reused, automatically ours
+--   2. not loaded, but the search path finds the HOST's copy -> two builds of
+--      one library in one process, ABI mixed
+--   3. not loaded and not findable   -> the vendor fails to load, no GPU
+--
+-- Our loader's built-in search path cannot exist by construction (AD-5), so
+-- (3) is the default outcome; `DEVICE_COUNT=0`. The historical fix was to put
+-- our libraries on LD_LIBRARY_PATH, which reaches (1)/(2) and also hands them
+-- to every OTHER process in the subos -- including host binaries running on
+-- the host loader. That is how `xlings subos use` once returned a /bin/bash
+-- that died of SIGSEGV before printing a character.
+--
+-- This does the same job with a scope of exactly one object. An interposer is
+-- a tiny shared object that
+--
+--   * takes the vendor's SONAME, so whoever asks for it gets this instead;
+--   * NEEDs the real vendor by absolute path, so the vendor still loads and
+--     `dlsym` on the handle still finds its entry points (dlsym searches the
+--     handle's whole dependency tree);
+--   * carries DT_RPATH -- not RUNPATH -- naming our payload closure, and
+--     DT_RPATH is transitive along the load chain, so the vendor's own
+--     DT_NEEDED resolve there.
+--
+-- Nothing is put on any process-global variable. Measured on a real NVIDIA
+-- stack (2026-08-06): with LD_LIBRARY_PATH carrying only the host driver
+-- directory, GL_RENDERER came back `NVIDIA GeForce RTX 4080/PCIe/SSE2` and the
+-- probe read back the pixel it drew. The same subos with the LD_LIBRARY_PATH
+-- approach removed and nothing in its place renders on llvmpipe.
+--
+-- PRECONDITION, and it is not optional -- also measured:
+--
+--   > An object produced here may only be loaded by a consumer whose INTERP
+--   > points into OUR payload. Host binaries must keep using the host's own
+--   > vendor.
+--
+-- Handing one to a host binary fails as
+--   `librt.so.1: undefined symbol: __pointer_chk_guard, version GLIBC_PRIVATE`
+-- because the RPATH names our glibc while the process's libc is the host's --
+-- the loader/libc split, from the one direction the same-source assertion
+-- cannot see. Callers arrange this by pointing only OUR vendor-config files at
+-- the interposer; see the recipe.
+--
+--   elfpatch.host_link_interposer{
+--       vendor  = "/usr/lib/x86_64-linux-gnu/libEGL_nvidia.so.550.144.03",
+--       out     = path.join(pkginfo.install_dir(), "lib", "libEGL_nvidia.so.0"),
+--       soname  = "libEGL_nvidia.so.0",     -- default: basename of `out`
+--       stub    = "<path to a prebuilt empty .so>",   -- default: from the
+--                                                     -- `interposer-stub` dep
+--       libdirs = { ... },                  -- default: closure_lib_paths()
+--   }
+--
+-- `libdirs` defaults to the closure the resolver already computed. Do not pass
+-- a hand-written list: R7 -- the dependency table this replaces was written by
+-- hand and was missing libm, libdrm, libgbm, libgcc_s and libwayland-*, every
+-- one of which was silently coming from the host.
+function M.host_link_interposer(opt)
+    opt = opt or {}
+    local vendor = opt.vendor
+    local out    = opt.out
+    if not vendor or vendor == "" then
+        error("elfpatch.host_link_interposer: `vendor` is required (the "
+              .. "absolute path of the host's vendor library)")
+    end
+    if not out or out == "" then
+        error("elfpatch.host_link_interposer: `out` is required")
+    end
+    if not os.isfile(vendor) then
+        error("elfpatch.host_link_interposer: vendor not found: " .. vendor
+              .. " -- the host does not have this driver installed, and an "
+              .. "interposer pointing at a missing file would load as "
+              .. "successfully as one pointing at nothing")
+    end
+
+    local soname = opt.soname
+    if not soname or soname == "" then soname = path.filename(out) end
+
+    -- The stub. Prebuilt and shipped as a package (AD-12): there is no
+    -- compiler at install time, and an object cannot be created by patchelf,
+    -- only edited.
+    local stub = opt.stub
+    if not stub or stub == "" then
+        local pkginfo = _LIBXPKG_MODULES and _LIBXPKG_MODULES["pkginfo"]
+        if pkginfo and type(pkginfo.tool_payload_dir) == "function" then
+            local d = pkginfo.tool_payload_dir("interposer-stub")
+            if d and d ~= "" then
+                local cand = path.join(d, "lib", "interposer-stub.so")
+                if os.isfile(cand) then stub = cand end
+            end
+        end
+    end
+    if not stub or not os.isfile(stub) then
+        error("elfpatch.host_link_interposer: no stub. Declare a dependency "
+              .. "on `interposer-stub`, or pass `stub = <path>`. There is no "
+              .. "compiler at install time and patchelf edits objects rather "
+              .. "than creating them.")
+    end
+
+    local libdirs = opt.libdirs
+    if not libdirs then
+        local closure = M.closure_lib_paths({})
+        libdirs = (type(closure) == "table") and closure or {}
+    end
+    if #libdirs == 0 then
+        error("elfpatch.host_link_interposer: the payload closure is empty, "
+              .. "so the interposer would resolve the vendor's dependencies "
+              .. "from the HOST -- which is what it exists to stop. Check "
+              .. "that the package declares its runtime deps.")
+    end
+
+    local tool = _find_tool("patchelf")
+    if not tool then
+        error("elfpatch.host_link_interposer: patchelf not found")
+    end
+
+    local outdir = path.directory(out)
+    if outdir and outdir ~= "" and not os.isdir(outdir) then os.mkdir(outdir) end
+    os.tryrm(out)
+    os.cp(stub, out)
+
+    local rpath = table.concat(libdirs, ":")
+    local steps = {
+        { "--set-soname " .. _shell_quote(soname), "set-soname" },
+        { "--add-needed " .. _shell_quote(vendor), "add-needed" },
+        { "--set-rpath " .. _shell_quote(rpath) .. " --force-rpath", "set-rpath" },
+    }
+    for _, s in ipairs(steps) do
+        if not _exec_ok(_shell_quote(tool.program) .. " " .. s[1] .. " "
+                        .. _shell_quote(out)) then
+            error("elfpatch.host_link_interposer: patchelf " .. s[2]
+                  .. " failed on " .. out)
+        end
+    end
+
+    -- Assert the artifact, not the intent (R4). Three properties, and each one
+    -- silently absent produces an interposer that loads fine and does nothing:
+    -- a wrong SONAME is simply never asked for; a missing NEEDED yields an
+    -- object with no vendor behind it, so dlsym finds no entry point and the
+    -- caller reports "no device"; DT_RUNPATH instead of DT_RPATH is not
+    -- transitive, so the vendor's own dependencies fall through to the host.
+    local dyn = _iorun(_shell_quote(tool.program) .. " --print-soname "
+                       .. _shell_quote(out)) or ""
+    if not dyn:find(soname, 1, true) then
+        error("elfpatch.host_link_interposer: SONAME is '"
+              .. _trim(dyn) .. "', expected '" .. soname
+              .. "' -- nothing would ever ask for this object")
+    end
+    local needed = _iorun(_shell_quote(tool.program) .. " --print-needed "
+                          .. _shell_quote(out)) or ""
+    if not needed:find(vendor, 1, true) then
+        error("elfpatch.host_link_interposer: the vendor is not NEEDED by "
+              .. out .. " -- dlsym would find no entry point, and the caller "
+              .. "would report no device rather than an error")
+    end
+    local got_rpath = _trim(_iorun(_shell_quote(tool.program) .. " --print-rpath "
+                                   .. _shell_quote(out)) or "")
+    if got_rpath == "" then
+        error("elfpatch.host_link_interposer: no RPATH on " .. out
+              .. " -- the vendor's dependencies would resolve from the host")
+    end
+
+    _info(string.format(
+        "interposer %s -> %s (%d closure dir(s))", soname, vendor, #libdirs))
+    return { out = out, soname = soname, vendor = vendor, libdirs = libdirs }
+end
+
 return M

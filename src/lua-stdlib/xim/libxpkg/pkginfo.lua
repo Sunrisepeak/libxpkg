@@ -255,9 +255,52 @@ function M.install_dir(pkgname, pkgversion)
     end
     local dir = M.dep_install_dir(pkgname, pkgversion)
     if dir then return dir end
+
+    -- Say WHY, not "cannot".
+    --
+    -- "cannot get install dir" names an internal state, and the two causes it
+    -- covers point in opposite directions: a path/permission problem, and a
+    -- package that is not a dependency here at all. Measured (openxlings/
+    -- xlings#487): a macOS install of ollama reported it for
+    -- `xim:libcuda-host-link`, a linux-only sentinel that macOS never
+    -- resolves -- the hook asked for it unconditionally because its branch
+    -- tested `is_host("windows")` when the real distinction was linux. The
+    -- message sent the reader looking at paths.
+    --
+    -- `deps_list` is what the resolver produced FOR THIS PLATFORM, so a name
+    -- missing from it is not "unresolvable" -- it is "not a dependency of
+    -- this package here".
     local log = _get_log()
-    if log then log.error("cannot get install dir for %s@%s",
-        tostring(pkgname), tostring(pkgversion or "latest")) end
+    if log then
+        local want = tostring(pkgname)
+        local bare = want:gsub("^[%w_-]+:", "")
+        local declared = false
+        for _, d in ipairs(M.deps_list()) do
+            local dn = tostring(d):gsub("@.*$", "")
+            if dn == want or dn:gsub("^[%w_-]+:", "") == bare then
+                declared = true
+                break
+            end
+        end
+        if declared then
+            log.error("install dir for %s@%s: declared as a dependency of %s "
+                      .. "but no payload is on disk -- the dependency install "
+                      .. "did not complete",
+                      want, tostring(pkgversion or "latest"),
+                      tostring(M.name() or "this package"))
+        else
+            log.error("install dir for %s@%s: NOT a dependency of %s on this "
+                      .. "platform (%s). Its deps here are: %s. A package "
+                      .. "declared only under another platform's xpm section "
+                      .. "is never resolved on this one -- guard the hook that "
+                      .. "asks for it with the platform it belongs to.",
+                      want, tostring(pkgversion or "latest"),
+                      tostring(M.name() or "this package"),
+                      tostring(os.host()),
+                      (#M.deps_list() > 0
+                         and table.concat(M.deps_list(), ", ") or "<none>"))
+        end
+    end
     return nil
 end
 

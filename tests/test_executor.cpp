@@ -582,6 +582,88 @@ TEST(ExecutorTest, HostLinkInterposer_RefusesAnEmptyClosure) {
 // exactly as successfully as one NEEDing nothing, and the caller reports "no
 // device" -- a machine without this driver must fail at install, where the
 // message can say so.
+// `install_dir` for a package that is not a dependency here must SAY that.
+//
+// openxlings/xlings#487: a macOS install of ollama reported "cannot get
+// install dir for xim:libcuda-host-link@0.0.1" -- a linux-only sentinel that
+// macOS never resolves, asked for by a hook whose branch tested
+// `is_host("windows")` when the real distinction was linux. "cannot" names an
+// internal state and covers two causes that point opposite ways: a broken
+// path, and a package that was never a dependency here. The reader went
+// looking at paths.
+//
+// The hook still returns nil either way -- this is about which of the two the
+// message names.
+TEST(ExecutorTest, InstallDir_NotADependencyHere_SaysSoRatherThanCannot) {
+    const fs::path temp_dir = make_temp_dir("libxpkg-installdir-why-");
+    const fs::path install_dir = temp_dir / "install";
+    const fs::path pkg_path = temp_dir / "consumer.lua";
+    fs::create_directories(install_dir);
+
+    write_text(pkg_path,
+        "package = { spec = \"1\", name = \"consumer\", xpm = { linux = { [\"latest\"] = { ref = \"1.0.0\" }, [\"1.0.0\"] = { url = \"https://example.com/d.tar.gz\", sha256 = \"0\" } } } }\n"
+        "local pkginfo = import(\"xim.libxpkg.pkginfo\")\n"
+        "function install()\n"
+        "    local d = pkginfo.install_dir(\"xim:linux-only-thing\", \"0.0.1\")\n"
+        "    if d then error(\"expected nil for a package that is not a dep\") end\n"
+        "    return true\n"
+        "end\n");
+
+    auto exec = create_executor(pkg_path);
+    ASSERT_TRUE(exec.has_value()) << (exec ? "" : exec.error());
+    auto ctx = make_context(install_dir, "macosx");
+    ctx.deps_list = {"xim:something-else@1.0.0"};
+    // The Lua `log.error` goes to the process's stdout, not HookResult::output.
+    testing::internal::CaptureStdout();
+    auto r = exec->run_hook(HookType::Install, ctx);
+    const std::string out = testing::internal::GetCapturedStdout() + r.output;
+    EXPECT_TRUE(r.success) << "the hook itself is fine; only the message changes";
+    EXPECT_NE(out.find("NOT a dependency"), std::string::npos)
+        << "the message must name the cause, not the internal state. got:\n" << out;
+    EXPECT_NE(out.find("linux-only-thing"), std::string::npos)
+        << "the message must name the package asked for. got:\n" << out;
+    EXPECT_NE(out.find("something-else"), std::string::npos)
+        << "the message must list what IS a dep here, so the reader can see "
+           "the platform split. got:\n" << out;
+
+    fs::remove_all(temp_dir);
+}
+
+// A package that IS declared here but has no payload is the OTHER cause, and
+// it must not be described as a platform mismatch -- that would send the
+// reader to the recipe's platform sections when the dependency install is
+// what failed.
+TEST(ExecutorTest, InstallDir_DeclaredButAbsent_NamesTheIncompleteInstall) {
+    const fs::path temp_dir = make_temp_dir("libxpkg-installdir-absent-");
+    const fs::path install_dir = temp_dir / "install";
+    const fs::path pkg_path = temp_dir / "consumer.lua";
+    fs::create_directories(install_dir);
+
+    write_text(pkg_path,
+        "package = { spec = \"1\", name = \"consumer\", xpm = { linux = { [\"latest\"] = { ref = \"1.0.0\" }, [\"1.0.0\"] = { url = \"https://example.com/d.tar.gz\", sha256 = \"0\" } } } }\n"
+        "local pkginfo = import(\"xim.libxpkg.pkginfo\")\n"
+        "function install()\n"
+        "    pkginfo.install_dir(\"xim:declared-thing\", \"0.0.1\")\n"
+        "    return true\n"
+        "end\n");
+
+    auto exec = create_executor(pkg_path);
+    ASSERT_TRUE(exec.has_value()) << (exec ? "" : exec.error());
+    auto ctx = make_context(install_dir, "linux");
+    ctx.deps_list = {"xim:declared-thing@0.0.1"};
+    testing::internal::CaptureStdout();
+    auto r = exec->run_hook(HookType::Install, ctx);
+    const std::string out = testing::internal::GetCapturedStdout() + r.output;
+    EXPECT_TRUE(r.success);
+    EXPECT_NE(out.find("declared as a dependency"), std::string::npos)
+        << "got:\n" << out;
+    EXPECT_EQ(out.find("NOT a dependency"), std::string::npos)
+        << "a declared-but-absent dep must not be reported as a platform "
+           "mismatch. got:\n" << out;
+
+    fs::remove_all(temp_dir);
+}
+
 TEST(ExecutorTest, HostLinkInterposer_RefusesAMissingVendor) {
 #ifdef _WIN32
     GTEST_SKIP() << "ELF-specific";

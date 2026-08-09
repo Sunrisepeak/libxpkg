@@ -58,10 +58,13 @@ struct ExecutionContext {
     // deps that actually declare exports show up; missing entries mean
     // "this dep declared nothing — fall back to convention".
     std::unordered_map<std::string, DepExport> deps_exports;
-    // Keyed by the same spec string as deps_exports, but TOTAL: every runtime
-    // dep is here whether or not it declared exports. Empty only when the
-    // client predates it — libxpkg then degrades to scanning and says so.
+    // Keyed by the same spec string as deps_exports. Authoritative for runtime
+    // deps resolved in this plan, but not total across separate host dependency
+    // domains; those stores are supplied explicitly below.
     std::unordered_map<std::string, ResolvedDep> resolved_deps;
+    // Ordered host store roots for dependencies outside this resolver plan.
+    // Presence in _RUNTIME marks a modern context even when the vector is empty.
+    std::vector<fs::path> dependency_store_roots;
     // The current package's own exports (rule 2 in the predicate trigger).
     DepExport self_exports;
     std::string subos_sysrootdir;
@@ -654,6 +657,12 @@ void inject_context(lua::State* L, const mcpplibs::xpkg::ExecutionContext& ctx) 
     push_string_array(ctx.deps_list,         "deps_list");
     push_string_array(ctx.runtime_deps_list, "runtime_deps_list");
     push_string_array(ctx.build_deps_list,   "build_deps_list");
+    std::vector<std::string> dependencyStoreRoots;
+    dependencyStoreRoots.reserve(ctx.dependency_store_roots.size());
+    for (const auto& root : ctx.dependency_store_roots) {
+        dependencyStoreRoots.push_back(root.string());
+    }
+    push_string_array(dependencyStoreRoots, "dependency_store_roots");
 
     // deps_exports: { [dep_spec] = { loader, libdirs, abi }, ... }
     // Only deps that declared exports show up here.
@@ -668,9 +677,9 @@ void inject_context(lua::State* L, const mcpplibs::xpkg::ExecutionContext& ctx) 
     lua::setfield(L, -2, "deps_exports");
 
     // resolved_deps: { [spec] = { name, version, install_dir, libdirs, source } }
-    // Total, unlike deps_exports. A hook that finds a dep missing from HERE is
-    // running on a client that does not send it, not looking at a dep that
-    // declared nothing — the two used to be indistinguishable.
+    // Authoritative for dependencies represented by this resolver plan, unlike
+    // deps_exports. Other host dependency domains are represented by the
+    // explicit dependency_store_roots above.
     lua::newtable(L);
     for (auto& [dep_spec, r] : ctx.resolved_deps) {
         lua::newtable(L);

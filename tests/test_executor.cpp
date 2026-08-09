@@ -2599,3 +2599,122 @@ TEST(ExecutorTest, SubosEnv_ProbeMustTestTypeBecauseUnknownModulesAreTruthy) {
     EXPECT_EQ(ops[3].name, "absent.typed.false");
     fs::remove_all(dir);
 }
+
+// The shape gcc.lua and llvm.lua actually use, and the shape they should use.
+//
+// Both declare `xim:glibc@>=2.39` and then ask `dep_install_dir("glibc")` --
+// bare and unversioned. 0.0.55 made explicit dependency stores the resolver
+// for this path, and they answer only an exact NAMESPACED coordinate, so the
+// call started returning nil. Silently: a recipe cannot tell that from "the
+// dependency is not installed". Measured under xlings 2026.8.10.1 -- gcc's
+// config hook reported "glibc payload not found" on a home where glibc was
+// installed, and gcc could not install on Linux.
+//
+// nil is the right answer for a bare name (guessing between `compat-x-zlib`
+// and `other-x-zlib` is the decoy problem these roots remove). Saying nothing
+// was not. And the query IS answerable the moment the caller names the
+// dependency the way it declared it.
+TEST(ExecutorTest, PkgInfo_NamespacedUnversionedQueryUsesResolvedRecord) {
+    const fs::path tempDir = make_temp_dir("libxpkg-pkginfo-ns-noversion-");
+    const fs::path registryRoot = tempDir / "registry" / "data" / "xpkgs";
+    const fs::path glibcPayload = registryRoot / "xim-x-glibc" / "2.44";
+    const fs::path memberPayload = tempDir / "member" / "data" / "xpkgs" /
+                                   "consumer" / "1.0.0";
+    const fs::path pkgPath = tempDir / "consumer.lua";
+    fs::create_directories(glibcPayload);
+    fs::create_directories(memberPayload);
+
+    write_text(pkgPath,
+        "package = { spec = \"1\", name = \"consumer\", xpm = { linux = { [\"1.0.0\"] = {} } } }\n"
+        "local pkginfo = import(\"xim.libxpkg.pkginfo\")\n"
+        "function install()\n"
+        "    local got = pkginfo.dep_install_dir(\"xim:glibc\")\n"
+        "    assert(got ~= nil, \"namespaced unversioned query resolved to nil\")\n"
+        "    assert(got:find(\"xim-x-glibc\", 1, true) ~= nil, got)\n"
+        "    return true\n"
+        "end\n");
+
+    auto exec = create_executor(pkgPath);
+    ASSERT_TRUE(exec.has_value()) << (exec ? "" : exec.error());
+    auto ctx = make_context(memberPayload, "linux");
+    ctx.dependency_store_roots = {registryRoot};
+    ctx.resolved_deps["xim:glibc@>=2.39"] = ResolvedDep {
+        .spec = "xim:glibc@>=2.39",
+        .name = "xim:glibc",
+        .version = "2.44",
+        .install_dir = glibcPayload.string(),
+        .libdirs = {},
+        .source = "plan-range",
+    };
+
+    auto result = exec->run_hook(HookType::Install, ctx);
+    EXPECT_TRUE(result.success) << result.error << "\n" << result.output;
+}
+
+// The bare form still returns nil -- and now says why, and what to write
+// instead. "Cannot answer" and "not installed" must not look the same.
+TEST(ExecutorTest, PkgInfo_BareNameUnderExplicitRootsExplainsItself) {
+    const fs::path tempDir = make_temp_dir("libxpkg-pkginfo-bare-explains-");
+    const fs::path registryRoot = tempDir / "registry" / "data" / "xpkgs";
+    const fs::path memberPayload = tempDir / "member" / "data" / "xpkgs" /
+                                   "consumer" / "1.0.0";
+    const fs::path pkgPath = tempDir / "consumer.lua";
+    fs::create_directories(registryRoot / "xim-x-glibc" / "2.44");
+    fs::create_directories(memberPayload);
+
+    write_text(pkgPath,
+        "package = { spec = \"1\", name = \"consumer\", xpm = { linux = { [\"1.0.0\"] = {} } } }\n"
+        "local pkginfo = import(\"xim.libxpkg.pkginfo\")\n"
+        "function install()\n"
+        "    local got = pkginfo.dep_install_dir(\"glibc\")\n"
+        "    assert(got == nil, \"bare name guessed: \" .. tostring(got))\n"
+        "    return true\n"
+        "end\n");
+
+    auto exec = create_executor(pkgPath);
+    ASSERT_TRUE(exec.has_value()) << (exec ? "" : exec.error());
+    auto ctx = make_context(memberPayload, "linux");
+    ctx.dependency_store_roots = {registryRoot};
+
+    auto result = exec->run_hook(HookType::Install, ctx);
+    EXPECT_TRUE(result.success) << result.error << "\n" << result.output;
+    EXPECT_NE(result.output.find("bare name cannot be resolved"),
+              std::string::npos)
+        << "a bare-name miss must explain itself:\n" << result.output;
+    EXPECT_NE(result.output.find("ns:glibc"), std::string::npos)
+        << "the diagnostic must show the call that would work:\n"
+        << result.output;
+}
+
+// ...and the guarantee 0.0.55 added is untouched: an EXACT,
+// NAMESPACED coordinate that the supplied roots do not contain is a definite
+// no. If this fell through to the scan, a same-bare-name decoy elsewhere would
+// answer it -- which is the whole thing explicit roots exist to prevent.
+TEST(ExecutorTest, PkgInfo_ExactNamespacedCoordinateStillFailsClosed) {
+    const fs::path tempDir = make_temp_dir("libxpkg-pkginfo-exact-closed-");
+    const fs::path registryRoot = tempDir / "registry" / "data" / "xpkgs";
+    const fs::path memberXpkgs = tempDir / "member" / "data" / "xpkgs";
+    const fs::path decoy = memberXpkgs / "other-x-zlib" / "1.3.2";
+    const fs::path memberPayload = memberXpkgs / "consumer" / "1.0.0";
+    const fs::path pkgPath = tempDir / "consumer.lua";
+    fs::create_directories(registryRoot);
+    fs::create_directories(decoy);
+    fs::create_directories(memberPayload);
+
+    write_text(pkgPath,
+        "package = { spec = \"1\", name = \"consumer\", xpm = { linux = { [\"1.0.0\"] = {} } } }\n"
+        "local pkginfo = import(\"xim.libxpkg.pkginfo\")\n"
+        "function install()\n"
+        "    local got = pkginfo.dep_install_dir(\"compat:zlib\", \"1.3.2\")\n"
+        "    assert(got == nil, \"exact coordinate fell through to: \" .. tostring(got))\n"
+        "    return true\n"
+        "end\n");
+
+    auto exec = create_executor(pkgPath);
+    ASSERT_TRUE(exec.has_value()) << (exec ? "" : exec.error());
+    auto ctx = make_context(memberPayload, "linux");
+    ctx.dependency_store_roots = {registryRoot};
+
+    auto result = exec->run_hook(HookType::Install, ctx);
+    EXPECT_TRUE(result.success) << result.error << "\n" << result.output;
+}

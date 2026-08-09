@@ -295,7 +295,43 @@ function M.dep_install_dir(dep_name, dep_version)
 
     local roots = _RUNTIME and _RUNTIME.dependency_store_roots
     if type(roots) == "table" then
-        return _resolve_dep_via_explicit_roots(dep_name, dep_version)
+        local hit = _resolve_dep_via_explicit_roots(dep_name, dep_version)
+        if hit then return hit end
+
+        -- Explicit roots answer an EXACT, NAMESPACED coordinate and nothing
+        -- else, on purpose: a bare `zlib` would have to pick between
+        -- `compat-x-zlib` and `other-x-zlib`, and guessing is the decoy problem
+        -- these roots exist to remove. So nil is the right ANSWER here.
+        --
+        -- It was the wrong SILENCE. 0.0.55 returned nil for an underspecified
+        -- query with no word to the caller, and a recipe cannot tell that from
+        -- "the dependency is not installed". Measured: `gcc.lua` and
+        -- `llvm.lua` call `dep_install_dir("glibc")` -- bare, unversioned --
+        -- while both declare `xim:glibc@>=2.39`, so they know the namespace and
+        -- simply did not pass it. Under xlings 2026.8.10.1 they got nil and
+        -- reported "glibc payload not found" on homes where glibc was
+        -- installed; gcc could not install on Linux at all.
+        --
+        -- The query is answerable -- through `resolved_deps`, the single
+        -- source this whole path is built around -- as soon as the caller
+        -- names the dependency the way it declared it. Say so.
+        local ns = _parse_namespace(dep_name)
+        local log = _get_log()
+        if log and _RUNTIME and _RUNTIME.install_dir then
+            if not ns then
+                log.error("dep_install_dir(%s): a bare name cannot be resolved "
+                          .. "against explicit dependency stores -- it does not "
+                          .. "say which namespace. Pass the coordinate as "
+                          .. "declared, e.g. \"ns:%s\".",
+                          tostring(dep_name), tostring(dep_name))
+            elseif not _is_exact_store_version(dep_version) then
+                log.error("dep_install_dir(%s, %s): explicit dependency stores "
+                          .. "need an exact version. Omit the version to use "
+                          .. "the resolved dependency record instead.",
+                          tostring(dep_name), tostring(dep_version))
+            end
+        end
+        return nil
     end
 
     local result = _resolve_dep_via_scan(dep_name, dep_version)

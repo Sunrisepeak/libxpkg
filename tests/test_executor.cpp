@@ -961,6 +961,122 @@ TEST(ExecutorTest, PkgInfo_ExactResolverRecordWinsOverExplicitRoots) {
     fs::remove_all(tempDir);
 }
 
+TEST(ExecutorTest, PkgInfo_UniqueBareNameUsesExactResolvedRecord) {
+    const fs::path tempDir = make_temp_dir("libxpkg-pkginfo-bare-record-");
+    const fs::path recordPayload = tempDir / "resolved" / "compat-x-zlib" /
+                                   "1.3.2";
+    const fs::path memberPayload = tempDir / "member" / "data" / "xpkgs" /
+                                   "consumer" / "1.0.0";
+    const fs::path pkgPath = tempDir / "consumer.lua";
+    fs::create_directories(recordPayload);
+    fs::create_directories(memberPayload);
+
+    write_text(pkgPath,
+        "package = { spec = \"1\", name = \"consumer\", xpm = { linux = { [\"1.0.0\"] = {} } } }\n"
+        "local pkginfo = import(\"xim.libxpkg.pkginfo\")\n"
+        "function install()\n"
+        "    local got = pkginfo.install_dir(\"zlib\", \"1.3.2\")\n"
+        "    assert(got == \"" + recordPayload.string() +
+            "\", \"unique bare record mismatch: \" .. tostring(got))\n"
+        "    return true\n"
+        "end\n");
+
+    auto exec = create_executor(pkgPath);
+    ASSERT_TRUE(exec.has_value()) << (exec ? "" : exec.error());
+    auto ctx = make_context(memberPayload, "linux");
+    ctx.resolved_deps["compat:zlib@>=1.0"] = ResolvedDep {
+        .spec = "compat:zlib@>=1.0",
+        .name = "compat:zlib",
+        .version = "1.3.2",
+        .install_dir = recordPayload.string(),
+        .libdirs = {},
+        .source = "plan",
+    };
+    ctx.dependency_store_roots = {};
+    const auto result = exec->run_hook(HookType::Install, ctx);
+    EXPECT_TRUE(result.success) << result.error << "\n" << result.output;
+
+    fs::remove_all(tempDir);
+}
+
+TEST(ExecutorTest, PkgInfo_BareNameRejectsResolvedNamespaceCollision) {
+    const fs::path tempDir = make_temp_dir("libxpkg-pkginfo-bare-collision-");
+    const fs::path compatPayload = tempDir / "resolved" / "compat-x-zlib" /
+                                   "1.3.2";
+    const fs::path otherPayload = tempDir / "resolved" / "other-x-zlib" /
+                                  "1.3.2";
+    const fs::path memberPayload = tempDir / "member" / "data" / "xpkgs" /
+                                   "consumer" / "1.0.0";
+    const fs::path pkgPath = tempDir / "consumer.lua";
+    fs::create_directories(compatPayload);
+    fs::create_directories(otherPayload);
+    fs::create_directories(memberPayload);
+
+    write_text(pkgPath,
+        "package = { spec = \"1\", name = \"consumer\", xpm = { linux = { [\"1.0.0\"] = {} } } }\n"
+        "local pkginfo = import(\"xim.libxpkg.pkginfo\")\n"
+        "function install()\n"
+        "    local got = pkginfo.dep_install_dir(\"zlib\", \"1.3.2\")\n"
+        "    assert(got == nil, \"namespace collision chose: \" .. tostring(got))\n"
+        "    return true\n"
+        "end\n");
+
+    auto exec = create_executor(pkgPath);
+    ASSERT_TRUE(exec.has_value()) << (exec ? "" : exec.error());
+    auto ctx = make_context(memberPayload, "linux");
+    ctx.resolved_deps["compat:zlib@>=1.0"] = ResolvedDep {
+        .spec = "compat:zlib@>=1.0",
+        .name = "compat:zlib",
+        .version = "1.3.2",
+        .install_dir = compatPayload.string(),
+        .libdirs = {},
+        .source = "plan",
+    };
+    ctx.resolved_deps["other:zlib@1.3.2"] = ResolvedDep {
+        .spec = "other:zlib@1.3.2",
+        .name = "other:zlib",
+        .version = "1.3.2",
+        .install_dir = otherPayload.string(),
+        .libdirs = {},
+        .source = "plan",
+    };
+    ctx.dependency_store_roots = {};
+    const auto result = exec->run_hook(HookType::Install, ctx);
+    EXPECT_TRUE(result.success) << result.error << "\n" << result.output;
+
+    fs::remove_all(tempDir);
+}
+
+TEST(ExecutorTest, PkgInfo_ExplicitRootsRejectBareNameRequests) {
+    const fs::path tempDir = make_temp_dir("libxpkg-pkginfo-bare-root-");
+    const fs::path root = tempDir / "registry" / "data" / "xpkgs";
+    const fs::path namespacedPayload = root / "compat-x-zlib" / "1.3.2";
+    const fs::path memberPayload = tempDir / "member" / "data" / "xpkgs" /
+                                   "consumer" / "1.0.0";
+    const fs::path pkgPath = tempDir / "consumer.lua";
+    fs::create_directories(namespacedPayload);
+    fs::create_directories(memberPayload);
+
+    write_text(pkgPath,
+        "package = { spec = \"1\", name = \"consumer\", xpm = { linux = { [\"1.0.0\"] = {} } } }\n"
+        "local pkginfo = import(\"xim.libxpkg.pkginfo\")\n"
+        "function install()\n"
+        "    local got = pkginfo.dep_install_dir(\"zlib\", \"1.3.2\")\n"
+        "    assert(got == nil, \"bare root lookup chose: \" .. tostring(got))\n"
+        "    return true\n"
+        "end\n");
+
+    auto exec = create_executor(pkgPath);
+    ASSERT_TRUE(exec.has_value()) << (exec ? "" : exec.error());
+    auto ctx = make_context(memberPayload, "linux");
+    ctx.resolved_deps = {};
+    ctx.dependency_store_roots = {root};
+    const auto result = exec->run_hook(HookType::Install, ctx);
+    EXPECT_TRUE(result.success) << result.error << "\n" << result.output;
+
+    fs::remove_all(tempDir);
+}
+
 TEST(ExecutorTest, PkgInfo_InvalidExactRecordFailsWithoutRootFallback) {
     const fs::path tempDir = make_temp_dir("libxpkg-pkginfo-invalid-record-");
     const fs::path root = tempDir / "registry" / "data" / "xpkgs";
@@ -1072,22 +1188,29 @@ TEST(ExecutorTest, PkgInfo_ExplicitRootsDoNotInferMcppHome) {
     fs::remove_all(tempDir);
 }
 
-TEST(ExecutorTest, PkgInfo_ExplicitRootsRequireExactVersion) {
+TEST(ExecutorTest, PkgInfo_ExplicitRootsRejectWildcardPartialAndRangeVersions) {
     const fs::path tempDir = make_temp_dir("libxpkg-pkginfo-exact-version-");
     const fs::path root = tempDir / "registry" / "data" / "xpkgs";
-    const fs::path rangedDecoy = root / "compat-x-zlib" / "1.3.2";
+    const fs::path depRoot = root / "compat-x-zlib";
     const fs::path memberPayload = tempDir / "member" / "data" / "xpkgs" /
                                    "consumer" / "1.0.0";
     const fs::path pkgPath = tempDir / "consumer.lua";
-    fs::create_directories(rangedDecoy);
+    fs::create_directories(depRoot / "1.3.2");
+    fs::create_directories(depRoot / "1.x");
+#ifndef _WIN32
+    fs::create_directories(depRoot / "*");
+    fs::create_directories(depRoot / "1.3.*");
+#endif
     fs::create_directories(memberPayload);
 
     write_text(pkgPath,
         "package = { spec = \"1\", name = \"consumer\", xpm = { linux = { [\"1.0.0\"] = {} } } }\n"
         "local pkginfo = import(\"xim.libxpkg.pkginfo\")\n"
         "function install()\n"
-        "    local got = pkginfo.dep_install_dir(\"compat:zlib\", \">=1.0\")\n"
-        "    assert(got == nil, \"range selected a payload: \" .. tostring(got))\n"
+        "    for _, version in ipairs({\"*\", \"1.x\", \"1.3.*\", \">=1.0\"}) do\n"
+        "        local got = pkginfo.dep_install_dir(\"compat:zlib\", version)\n"
+        "        assert(got == nil, version .. \" selected a payload: \" .. tostring(got))\n"
+        "    end\n"
         "    return true\n"
         "end\n");
 

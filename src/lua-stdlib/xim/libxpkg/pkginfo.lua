@@ -159,15 +159,31 @@ local function _resolve_dep_via_scan(dep_name, dep_version)
     return nil
 end
 
+local function _is_exact_store_version(version)
+    if type(version) ~= "string" or version == "" or version == "latest"
+       or version:find("%s") or version:find("/", 1, true)
+       or version:find("\\", 1, true) or version:sub(1, 1) == "."
+       or version:sub(-1) == "." or version:find("..", 1, true) then
+        return false
+    end
+    for _, marker in ipairs({"<", ">", "=", "~", "^", "*", "?", "[", "]"}) do
+        if version:find(marker, 1, true) then return false end
+    end
+    for component in version:gmatch("[^.]+") do
+        if component:lower() == "x" then return false end
+    end
+    return true
+end
+
 local function _resolve_dep_via_explicit_roots(dep_name, dep_version)
-    if type(dep_version) ~= "string" or dep_version == ""
-       or dep_version:find("[<>=~^%s]") then
+    if not _is_exact_store_version(dep_version) then
         return nil
     end
     local ns, bare = _parse_namespace(dep_name)
+    if not ns then return nil end
     for _, root in ipairs((_RUNTIME and _RUNTIME.dependency_store_roots) or {}) do
-        local hit = _scan_dir(root, ns, bare, dep_version)
-        if hit then return hit end
+        local exact = path.join(root, ns .. "-x-" .. bare, dep_version)
+        if os.isdir(exact) then return exact end
     end
     return nil
 end
@@ -212,12 +228,27 @@ end
 -- everywhere — a trap this repo has fallen into twice (subos.env,
 -- xim.pkgindex.sysroot).
 --
--- Matched by exact spec first, because that is the key; then by exact canonical
--- name and resolved version. A bare-name match across namespaces is not a
--- resolver record for the requested dependency.
+-- Namespaced requests match their exact spec/canonical identity. Bare requests
+-- retain compatibility only when an exact requested version selects precisely
+-- one canonical resolver record; namespace collisions fail closed.
 function M.resolved_dep(dep_name, dep_version)
     local t = _RUNTIME and _RUNTIME.resolved_deps
     if type(t) ~= "table" then return nil end
+    local ns, bare = _parse_namespace(dep_name)
+    if not ns then
+        if not _is_exact_store_version(dep_version) then return nil end
+        local candidate = nil
+        for spec, rec in pairs(t) do
+            local canonical = rec.name or spec:gsub("@.*", "")
+            local _, record_bare = _parse_namespace(canonical)
+            if record_bare == bare and rec.version == dep_version then
+                if candidate then return nil end
+                candidate = rec
+            end
+        end
+        return candidate
+    end
+
     if dep_version and dep_version ~= "" then
         local exact = t[dep_name .. "@" .. dep_version]
         if exact then return exact end

@@ -104,6 +104,49 @@ ExecutionContext make_context(const fs::path& install_dir, std::string platform,
     return ctx;
 }
 
+bool is_valid_utf8(std::string_view text) {
+    std::size_t i = 0;
+    while (i < text.size()) {
+        const auto lead = static_cast<unsigned char>(text[i]);
+        if (lead <= 0x7f) {
+            ++i;
+            continue;
+        }
+
+        std::size_t continuationCount = 0;
+        std::uint32_t codePoint = 0;
+        std::uint32_t minimum = 0;
+        if ((lead & 0xe0) == 0xc0) {
+            continuationCount = 1;
+            codePoint = lead & 0x1f;
+            minimum = 0x80;
+        } else if ((lead & 0xf0) == 0xe0) {
+            continuationCount = 2;
+            codePoint = lead & 0x0f;
+            minimum = 0x800;
+        } else if ((lead & 0xf8) == 0xf0) {
+            continuationCount = 3;
+            codePoint = lead & 0x07;
+            minimum = 0x10000;
+        } else {
+            return false;
+        }
+
+        if (i + continuationCount >= text.size()) return false;
+        for (std::size_t j = 1; j <= continuationCount; ++j) {
+            const auto byte = static_cast<unsigned char>(text[i + j]);
+            if ((byte & 0xc0) != 0x80) return false;
+            codePoint = (codePoint << 6) | (byte & 0x3f);
+        }
+        if (codePoint < minimum || codePoint > 0x10ffff ||
+            (codePoint >= 0xd800 && codePoint <= 0xdfff)) {
+            return false;
+        }
+        i += continuationCount + 1;
+    }
+    return true;
+}
+
 } // namespace
 
 TEST(ExecutorTest, CreateExecutor_ExistingFile) {
@@ -139,6 +182,147 @@ TEST(ExecutorTest, HasHook_Installed_True) {
     ASSERT_TRUE(exec.has_value());
     // hello.lua has an installed() hook (unlike the old mdbook fixture)
     EXPECT_TRUE(exec->has_hook(HookType::Installed));
+}
+
+TEST(ExecutorTest, RunHook_CapturesLuaOutputAndNamesFalse) {
+    const fs::path temp = make_temp_dir("libxpkg-hook-output-");
+    const fs::path pkg = temp / "hook-output.lua";
+    write_text(pkg,
+        "package = { name = \"hook-output\", xpm = { linux = { [\"0.0.1\"] = {} } } }\n"
+        "local log = import(\"xim.libxpkg.log\")\n"
+        "function install()\n"
+        "    print(\"REPRO stdout\")\n"
+        "    log.error(\"REPRO log.error\")\n"
+        "    io.stderr:write(\"REPRO stderr\\n\")\n"
+        "    return false\n"
+        "end\n");
+
+    auto exec = create_executor(pkg);
+    ASSERT_TRUE(exec.has_value()) << exec.error();
+
+    testing::internal::CaptureStdout();
+    testing::internal::CaptureStderr();
+    const auto result = exec->run_hook(HookType::Install,
+                                       make_context(temp / "install", "linux"));
+    const std::string escapedStdout = testing::internal::GetCapturedStdout();
+    const std::string escapedStderr = testing::internal::GetCapturedStderr();
+
+    EXPECT_FALSE(result.success);
+    EXPECT_EQ(result.error, "install hook returned false");
+    EXPECT_NE(result.output.find("REPRO stdout"), std::string::npos);
+    EXPECT_NE(result.output.find("REPRO log.error"), std::string::npos);
+    EXPECT_NE(result.output.find("REPRO stderr"), std::string::npos);
+    EXPECT_EQ(escapedStdout.find("REPRO"), std::string::npos);
+    EXPECT_EQ(escapedStderr.find("REPRO"), std::string::npos);
+
+    fs::remove_all(temp);
+}
+
+TEST(ExecutorTest, RunHook_BoundsTranscriptAndKeepsTail) {
+    constexpr std::size_t outputCap = 16 * 1024;
+    constexpr std::string_view truncatedMarker =
+        "\n[libxpkg: hook output truncated]\n";
+    const fs::path temp = make_temp_dir("libxpkg-hook-output-bound-");
+    const fs::path pkg = temp / "hook-output-bound.lua";
+    write_text(pkg,
+        "package = { name = \"hook-output-bound\", xpm = { linux = { [\"0.0.1\"] = {} } } }\n"
+        "function install()\n"
+        "    io.write(string.rep(\"HEAD-\", 4000))\n"
+        "    io.write(string.char(0xff))\n"
+        "    io.write(\"TAIL-MARKER\\n\")\n"
+        "    return false\n"
+        "end\n");
+
+    auto exec = create_executor(pkg);
+    ASSERT_TRUE(exec.has_value()) << exec.error();
+    const auto result = exec->run_hook(HookType::Install,
+                                       make_context(temp / "install", "linux"));
+
+    EXPECT_FALSE(result.success);
+    EXPECT_LE(result.output.size(), outputCap + truncatedMarker.size());
+    EXPECT_NE(result.output.find("TAIL-MARKER"), std::string::npos);
+    EXPECT_NE(result.output.find("\xef\xbf\xbd"), std::string::npos);
+    EXPECT_TRUE(is_valid_utf8(result.output));
+    EXPECT_EQ(result.output.find(truncatedMarker),
+              result.output.rfind(truncatedMarker));
+    EXPECT_NE(result.output.find(truncatedMarker), std::string::npos);
+
+    fs::remove_all(temp);
+}
+
+TEST(ExecutorTest, RunHook_ExecutorTranscriptsDoNotCross) {
+    const fs::path temp = make_temp_dir("libxpkg-hook-output-concurrent-");
+    const fs::path pkgA = temp / "hook-a.lua";
+    const fs::path pkgB = temp / "hook-b.lua";
+    write_text(pkgA,
+        "package = { name = \"hook-a\", xpm = { linux = { [\"0.0.1\"] = {} } } }\n"
+        "function install()\n"
+        "    for _ = 1, 2000 do io.write(\"A\") end\n"
+        "    print(\"MARKER-A\")\n"
+        "    return false\n"
+        "end\n");
+    write_text(pkgB,
+        "package = { name = \"hook-b\", xpm = { linux = { [\"0.0.1\"] = {} } } }\n"
+        "function install()\n"
+        "    for _ = 1, 2000 do io.write(\"B\") end\n"
+        "    print(\"MARKER-B\")\n"
+        "    return false\n"
+        "end\n");
+
+    auto execA = create_executor(pkgA);
+    auto execB = create_executor(pkgB);
+    ASSERT_TRUE(execA.has_value()) << execA.error();
+    ASSERT_TRUE(execB.has_value()) << execB.error();
+    std::latch start { 2 };
+    auto runA = std::async(std::launch::async, [&] {
+        start.arrive_and_wait();
+        return execA->run_hook(HookType::Install,
+                               make_context(temp / "install-a", "linux"));
+    });
+    auto runB = std::async(std::launch::async, [&] {
+        start.arrive_and_wait();
+        return execB->run_hook(HookType::Install,
+                               make_context(temp / "install-b", "linux"));
+    });
+
+    const auto resultA = runA.get();
+    const auto resultB = runB.get();
+    EXPECT_NE(resultA.output.find("MARKER-A"), std::string::npos);
+    EXPECT_EQ(resultA.output.find("MARKER-B"), std::string::npos);
+    EXPECT_NE(resultB.output.find("MARKER-B"), std::string::npos);
+    EXPECT_EQ(resultB.output.find("MARKER-A"), std::string::npos);
+
+    fs::remove_all(temp);
+}
+
+TEST(ExecutorTest, RunHook_PreservesStderrMethodsAndOrdinaryFileWrites) {
+    const fs::path temp = make_temp_dir("libxpkg-hook-output-files-");
+    const fs::path pkg = temp / "hook-output-files.lua";
+    const fs::path written = temp / "written.txt";
+    write_text(pkg,
+        "package = { name = \"hook-output-files\", xpm = { linux = { [\"0.0.1\"] = {} } } }\n"
+        "function install()\n"
+        "    io.stderr:write(\"STDERR-MARKER\\n\")\n"
+        "    io.stderr:flush()\n"
+        "    local file = assert(io.open(\"" + written.string() + "\", \"w\"))\n"
+        "    file:write(\"FILE-PAYLOAD\")\n"
+        "    file:close()\n"
+        "    return true\n"
+        "end\n");
+
+    auto exec = create_executor(pkg);
+    ASSERT_TRUE(exec.has_value()) << exec.error();
+    const auto result = exec->run_hook(HookType::Install,
+                                       make_context(temp / "install", "linux"));
+
+    EXPECT_TRUE(result.success) << result.error;
+    EXPECT_NE(result.output.find("STDERR-MARKER"), std::string::npos);
+    EXPECT_EQ(result.output.find("FILE-PAYLOAD"), std::string::npos);
+    std::ifstream input(written);
+    EXPECT_EQ(std::string(std::istreambuf_iterator<char>(input), {}),
+              "FILE-PAYLOAD");
+
+    fs::remove_all(temp);
 }
 
 TEST(ExecutorTest, RunScriptCallsXpkgMain) {

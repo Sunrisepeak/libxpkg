@@ -68,6 +68,8 @@ struct ExecutionContext {
     std::string pkgindex_dir;    // package index repo root (for custom module loading)
 };
 
+inline constexpr std::size_t kMaxHookOutputBytes = 16 * 1024;
+
 struct HookResult {
     bool success = false;
     std::string output, error;
@@ -700,6 +702,256 @@ void inject_context(lua::State* L, const mcpplibs::xpkg::ExecutionContext& ctx) 
     lua::setglobal(L, "_RUNTIME");
 }
 
+constexpr std::string_view HOOK_OUTPUT_TRUNCATED_MARKER =
+    "\n[libxpkg: hook output truncated]\n";
+
+class HookOutput {
+    std::string bytes_;
+    bool truncated_ = false;
+
+    static bool is_continuation_byte_(unsigned char byte) {
+        return (byte & 0xc0) == 0x80;
+    }
+
+    static std::size_t valid_sequence_size_(std::string_view bytes,
+                                            std::size_t offset) {
+        const auto lead = static_cast<unsigned char>(bytes[offset]);
+        if (lead <= 0x7f) return 1;
+
+        std::size_t size = 0;
+        std::uint32_t codePoint = 0;
+        std::uint32_t minimum = 0;
+        if ((lead & 0xe0) == 0xc0) {
+            size = 2;
+            codePoint = lead & 0x1f;
+            minimum = 0x80;
+        } else if ((lead & 0xf0) == 0xe0) {
+            size = 3;
+            codePoint = lead & 0x0f;
+            minimum = 0x800;
+        } else if ((lead & 0xf8) == 0xf0) {
+            size = 4;
+            codePoint = lead & 0x07;
+            minimum = 0x10000;
+        } else {
+            return 0;
+        }
+
+        if (offset + size > bytes.size()) return 0;
+        for (std::size_t i = 1; i < size; ++i) {
+            const auto byte = static_cast<unsigned char>(bytes[offset + i]);
+            if (!is_continuation_byte_(byte)) return 0;
+            codePoint = (codePoint << 6) | (byte & 0x3f);
+        }
+        if (codePoint < minimum || codePoint > 0x10ffff ||
+            (codePoint >= 0xd800 && codePoint <= 0xdfff)) {
+            return 0;
+        }
+        return size;
+    }
+
+    static std::string replace_invalid_utf8_(std::string_view bytes) {
+        constexpr std::string_view replacement = "\xef\xbf\xbd";
+        std::string valid;
+        valid.reserve(bytes.size());
+        for (std::size_t i = 0; i < bytes.size();) {
+            const std::size_t sequenceSize = valid_sequence_size_(bytes, i);
+            if (sequenceSize == 0) {
+                valid.append(replacement);
+                ++i;
+            } else {
+                valid.append(bytes.substr(i, sequenceSize));
+                i += sequenceSize;
+            }
+        }
+        return valid;
+    }
+
+public:
+    void reset() {
+        bytes_.clear();
+        truncated_ = false;
+    }
+
+    void append(std::string_view bytes) {
+        if (bytes.empty()) return;
+        if (bytes.size() >= kMaxHookOutputBytes) {
+            truncated_ = truncated_ || !bytes_.empty() ||
+                         bytes.size() > kMaxHookOutputBytes;
+            bytes_.assign(bytes.substr(bytes.size() - kMaxHookOutputBytes));
+            return;
+        }
+        if (bytes_.size() > kMaxHookOutputBytes - bytes.size()) {
+            const std::size_t overflow =
+                bytes_.size() + bytes.size() - kMaxHookOutputBytes;
+            bytes_.erase(0, overflow);
+            truncated_ = true;
+        }
+        bytes_.append(bytes);
+    }
+
+    std::string finish() const {
+        std::string output = replace_invalid_utf8_(bytes_);
+        bool truncated = truncated_;
+        if (output.size() > kMaxHookOutputBytes) {
+            std::size_t offset = output.size() - kMaxHookOutputBytes;
+            while (offset < output.size() &&
+                   is_continuation_byte_(static_cast<unsigned char>(output[offset]))) {
+                ++offset;
+            }
+            output.erase(0, offset);
+            truncated = true;
+        }
+        if (truncated) output.insert(0, HOOK_OUTPUT_TRUNCATED_MARKER);
+        return output;
+    }
+};
+
+HookOutput* hook_output(lua::State* L) {
+    return static_cast<HookOutput*>(
+        lua::touserdata(L, lua::upvalueindex(1)));
+}
+
+void append_lua_value(lua::State* L, HookOutput& output, int index) {
+    unsigned long long size = 0;
+    const char* value = lua::L_tolstring(L, index, &size);
+    if (value) output.append(std::string_view(value, size));
+    lua::pop(L, 1);
+}
+
+int capture_print(lua::State* L) {
+    auto* output = hook_output(L);
+    if (!output) return 0;
+    const int count = lua::gettop(L);
+    for (int i = 1; i <= count; ++i) {
+        if (i > 1) output->append("\t");
+        append_lua_value(L, *output, i);
+    }
+    output->append("\n");
+    return 0;
+}
+
+int capture_io_write(lua::State* L) {
+    auto* output = hook_output(L);
+    if (output) {
+        const int count = lua::gettop(L);
+        for (int i = 1; i <= count; ++i) append_lua_value(L, *output, i);
+    }
+    lua::getglobal(L, "io");
+    lua::getfield(L, -1, "stdout");
+    lua::remove(L, -2);
+    return 1;
+}
+
+int capture_stderr_write(lua::State* L) {
+    if (lua::rawequal(L, 1, lua::upvalueindex(2))) {
+        auto* output = hook_output(L);
+        const int count = lua::gettop(L);
+        if (output) {
+            for (int i = 2; i <= count; ++i) append_lua_value(L, *output, i);
+        }
+        lua::pushvalue(L, 1);
+        return 1;
+    }
+
+    const int argumentCount = lua::gettop(L);
+    lua::pushvalue(L, lua::upvalueindex(3));
+    lua::insert(L, 1);
+    lua::call(L, argumentCount, lua::MULTRET);
+    return lua::gettop(L);
+}
+
+class HookCapture {
+    lua::State* L_ = nullptr;
+    HookOutput& output_;
+    int printRef_ = 0;
+    int ioRef_ = 0;
+    int ioWriteRef_ = 0;
+    int stderrRef_ = 0;
+    int stderrMethodsRef_ = 0;
+    int stderrWriteRef_ = 0;
+
+    void restore_() {
+        if (!L_) return;
+
+        lua::rawgeti(L_, lua::REGISTRYINDEX, ioRef_);
+        lua::rawgeti(L_, lua::REGISTRYINDEX, ioWriteRef_);
+        lua::setfield(L_, -2, "write");
+        lua::rawgeti(L_, lua::REGISTRYINDEX, stderrRef_);
+        lua::setfield(L_, -2, "stderr");
+        lua::setglobal(L_, "io");
+
+        lua::rawgeti(L_, lua::REGISTRYINDEX, stderrMethodsRef_);
+        lua::rawgeti(L_, lua::REGISTRYINDEX, stderrWriteRef_);
+        lua::setfield(L_, -2, "write");
+        lua::pop(L_, 1);
+
+        lua::rawgeti(L_, lua::REGISTRYINDEX, printRef_);
+        lua::setglobal(L_, "print");
+        lua::L_unref(L_, lua::REGISTRYINDEX, printRef_);
+        lua::L_unref(L_, lua::REGISTRYINDEX, ioRef_);
+        lua::L_unref(L_, lua::REGISTRYINDEX, ioWriteRef_);
+        lua::L_unref(L_, lua::REGISTRYINDEX, stderrRef_);
+        lua::L_unref(L_, lua::REGISTRYINDEX, stderrMethodsRef_);
+        lua::L_unref(L_, lua::REGISTRYINDEX, stderrWriteRef_);
+        L_ = nullptr;
+    }
+
+public:
+    HookCapture(lua::State* L, HookOutput& output)
+        : L_(L), output_(output) {
+        output_.reset();
+
+        lua::getglobal(L_, "print");
+        printRef_ = lua::L_ref(L_, lua::REGISTRYINDEX);
+        lua::getglobal(L_, "io");
+        ioRef_ = lua::L_ref(L_, lua::REGISTRYINDEX);
+
+        lua::rawgeti(L_, lua::REGISTRYINDEX, ioRef_);
+        lua::getfield(L_, -1, "write");
+        ioWriteRef_ = lua::L_ref(L_, lua::REGISTRYINDEX);
+        lua::getfield(L_, -1, "stderr");
+        stderrRef_ = lua::L_ref(L_, lua::REGISTRYINDEX);
+
+        lua::rawgeti(L_, lua::REGISTRYINDEX, stderrRef_);
+        lua::getmetatable(L_, -1);
+        lua::getfield(L_, -1, "__index");
+        stderrMethodsRef_ = lua::L_ref(L_, lua::REGISTRYINDEX);
+        lua::pop(L_, 2);
+
+        lua::rawgeti(L_, lua::REGISTRYINDEX, stderrMethodsRef_);
+        lua::getfield(L_, -1, "write");
+        stderrWriteRef_ = lua::L_ref(L_, lua::REGISTRYINDEX);
+        lua::pop(L_, 1);
+
+        lua::pushlightuserdata(L_, &output_);
+        lua::pushcclosure(L_, capture_print, 1);
+        lua::setglobal(L_, "print");
+
+        lua::pushlightuserdata(L_, &output_);
+        lua::pushcclosure(L_, capture_io_write, 1);
+        lua::setfield(L_, -2, "write");
+
+        lua::rawgeti(L_, lua::REGISTRYINDEX, stderrMethodsRef_);
+        lua::pushlightuserdata(L_, &output_);
+        lua::rawgeti(L_, lua::REGISTRYINDEX, stderrRef_);
+        lua::rawgeti(L_, lua::REGISTRYINDEX, stderrWriteRef_);
+        lua::pushcclosure(L_, capture_stderr_write, 3);
+        lua::setfield(L_, -2, "write");
+        lua::pop(L_, 2);
+    }
+
+    ~HookCapture() { restore_(); }
+
+    HookCapture(const HookCapture&) = delete;
+    HookCapture& operator=(const HookCapture&) = delete;
+
+    std::string finish() {
+        restore_();
+        return output_.finish();
+    }
+};
+
 } // namespace mcpplibs::xpkg::detail
 
 // ---- PackageExecutor ----
@@ -709,6 +961,8 @@ export namespace mcpplibs::xpkg {
 class PackageExecutor {
     lua::State* L_   = nullptr;
     fs::path    pkg_ ;
+    std::unique_ptr<detail::HookOutput> hookOutput_ =
+        std::make_unique<detail::HookOutput>();
 
 public:
     explicit PackageExecutor(lua::State* L, fs::path pkg)
@@ -722,13 +976,16 @@ public:
     PackageExecutor& operator=(const PackageExecutor&) = delete;
 
     PackageExecutor(PackageExecutor&& o) noexcept
-        : L_(std::exchange(o.L_, nullptr)), pkg_(std::move(o.pkg_)) {}
+        : L_(std::exchange(o.L_, nullptr)),
+          pkg_(std::move(o.pkg_)),
+          hookOutput_(std::move(o.hookOutput_)) {}
 
     PackageExecutor& operator=(PackageExecutor&& o) noexcept {
         if (this != &o) {
             if (L_) lua::close(L_);
             L_   = std::exchange(o.L_, nullptr);
             pkg_ = std::move(o.pkg_);
+            hookOutput_ = std::move(o.hookOutput_);
         }
         return *this;
     }
@@ -754,11 +1011,15 @@ public:
                                .error   = "hook not found: " + std::string(name) };
         }
 
+        detail::HookCapture capture(L_, *hookOutput_);
         HookResult result;
         if (lua::pcall(L_, 0, 1, 0) == lua::OK) {
             int t = lua::type(L_, -1);
             if (t == lua::TBOOLEAN) {
                 result.success = lua::toboolean(L_, -1);
+                if (!result.success) {
+                    result.error = std::string(name) + " hook returned false";
+                }
             } else if (t == lua::TSTRING) {
                 result.version = lua::tostring(L_, -1);
                 result.success = !result.version.empty();
@@ -769,9 +1030,16 @@ public:
             lua::pop(L_, 1);
         } else {
             result.success = false;
-            result.error   = lua::tostring(L_, -1);
+            if (const char* error = lua::tostring(L_, -1)) {
+                result.error = error;
+            }
             lua::pop(L_, 1);
         }
+
+        if (!result.success && result.error.empty()) {
+            result.error = std::string(name) + " hook failed";
+        }
+        result.output = capture.finish();
 
         return result;
     }

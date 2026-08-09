@@ -159,6 +159,35 @@ local function _resolve_dep_via_scan(dep_name, dep_version)
     return nil
 end
 
+local function _is_exact_store_version(version)
+    if type(version) ~= "string" or version == "" or version == "latest"
+       or version:find("%s") or version:find("/", 1, true)
+       or version:find("\\", 1, true) or version:sub(1, 1) == "."
+       or version:sub(-1) == "." or version:find("..", 1, true) then
+        return false
+    end
+    for _, marker in ipairs({"<", ">", "=", "~", "^", "*", "?", "[", "]"}) do
+        if version:find(marker, 1, true) then return false end
+    end
+    for component in version:gmatch("[^.]+") do
+        if component:lower() == "x" then return false end
+    end
+    return true
+end
+
+local function _resolve_dep_via_explicit_roots(dep_name, dep_version)
+    if not _is_exact_store_version(dep_version) then
+        return nil
+    end
+    local ns, bare = _parse_namespace(dep_name)
+    if not ns then return nil end
+    for _, root in ipairs((_RUNTIME and _RUNTIME.dependency_store_roots) or {}) do
+        local exact = path.join(root, ns .. "-x-" .. bare, dep_version)
+        if os.isdir(exact) then return exact end
+    end
+    return nil
+end
+
 -- Try xvm registry: for "ns:name", try "ns-name" first, then bare "name"
 local function _resolve_dep_via_xvm(dep_name, dep_version)
     local log = _get_log()
@@ -199,31 +228,50 @@ end
 -- everywhere — a trap this repo has fallen into twice (subos.env,
 -- xim.pkgindex.sysroot).
 --
--- Matched by spec first, because that is the key; then by bare name, because
--- callers reach this function from several directions and not all of them
--- still have the original spec string in hand.
+-- Namespaced requests match their exact spec/canonical identity. Bare requests
+-- retain compatibility only when an exact requested version selects precisely
+-- one canonical resolver record; namespace collisions fail closed.
 function M.resolved_dep(dep_name, dep_version)
     local t = _RUNTIME and _RUNTIME.resolved_deps
     if type(t) ~= "table" then return nil end
+    local ns, bare = _parse_namespace(dep_name)
+    if not ns then
+        if not _is_exact_store_version(dep_version) then return nil end
+        local candidate = nil
+        for spec, rec in pairs(t) do
+            local canonical = rec.name or spec:gsub("@.*", "")
+            local _, record_bare = _parse_namespace(canonical)
+            if record_bare == bare and rec.version == dep_version then
+                if candidate then return nil end
+                candidate = rec
+            end
+        end
+        return candidate
+    end
+
     if dep_version and dep_version ~= "" then
         local exact = t[dep_name .. "@" .. dep_version]
         if exact then return exact end
     end
-    local _, bare = _parse_namespace(dep_name)
     for spec, rec in pairs(t) do
         local sname = spec:gsub("@.*", "")
-        local _, sbare = _parse_namespace(sname)
-        if sname == dep_name or sbare == bare then return rec end
+        if sname == dep_name then
+            if not dep_version or dep_version == ""
+               or spec == dep_name .. "@" .. dep_version
+               or rec.version == dep_version then
+                return rec
+            end
+        end
     end
     return nil
 end
 
 -- Where a dependency actually lives.
 --
--- The resolver already decided this. Everything below the first branch is a
--- SECOND answer to a question that has one — kept only for callers with no
--- install context (tool scripts, offline queries), and noisy on purpose so
--- that "we guessed" is never silent.
+-- An exact resolver record is authoritative when present. Dependencies from
+-- separate host domains are looked up only in the ordered roots the host
+-- supplies. Scan/XVM guessing remains solely for old contexts where that roots
+-- field is absent, and is noisy on purpose so "we guessed" is never silent.
 --
 -- Two independent answers is exactly how a binary ends up with its INTERP
 -- from one glibc and its RUNPATH from another, which segfaults before main
@@ -231,8 +279,23 @@ end
 -- xlings/.agents/docs/2026-08-05-dependency-resolution-single-source.md
 function M.dep_install_dir(dep_name, dep_version)
     local rec = M.resolved_dep(dep_name, dep_version)
-    if rec and rec.install_dir and rec.install_dir ~= "" then
-        return rec.install_dir
+    if rec then
+        if rec.install_dir and rec.install_dir ~= ""
+           and os.isdir(rec.install_dir) then
+            return rec.install_dir
+        end
+        local log = _get_log()
+        if log then
+            log.error("dep_install_dir(%s): resolver record points to missing "
+                      .. "payload: %s", tostring(dep_name),
+                      tostring(rec.install_dir))
+        end
+        return nil
+    end
+
+    local roots = _RUNTIME and _RUNTIME.dependency_store_roots
+    if type(roots) == "table" then
+        return _resolve_dep_via_explicit_roots(dep_name, dep_version)
     end
 
     local result = _resolve_dep_via_scan(dep_name, dep_version)
@@ -241,9 +304,10 @@ function M.dep_install_dir(dep_name, dep_version)
     end
     local log = _get_log()
     if log and _RUNTIME and _RUNTIME.install_dir then
-        -- Inside an install, a miss means the client predates resolved_deps.
+        -- Inside an install, a missing roots field means the client predates
+        -- the explicit host-store contract.
         -- Outside one there is nothing to miss, so no warning.
-        log.warn("dep_install_dir(%s): no resolver record, fell back to a "
+        log.warn("dep_install_dir(%s): no explicit store roots, fell back to a "
                  .. "scan -> %s", tostring(dep_name), tostring(result))
     end
     return result
@@ -306,13 +370,11 @@ end
 
 -- The payload of a tool libxpkg ITSELF needs, e.g. patchelf for elfpatch.
 --
--- Same resolution as dep_install_dir, one difference in diagnostics: a missing
--- resolver record is not reported. That warning exists because a *dependency*
--- of the package being installed should have been resolved by the resolver, so
--- its absence means the client predates resolved_deps. A tool of libxpkg is not
--- a dependency of the package being installed -- nothing should have recorded
--- it -- so the same warning here would be a false report on every install, and
--- one the user cannot act on.
+-- This deliberately keeps its compatibility scan separate from
+-- dep_install_dir's explicit host-domain roots. A tool of libxpkg is not a
+-- dependency of the package being installed -- nothing should have recorded
+-- it or supplied its store domain -- so the dependency fallback warning here
+-- would be a false report on every install, and one the user cannot act on.
 --
 -- Returns the install_dir, or nil. Callers must handle nil: on a home where the
 -- tool's package is not installed there is no payload answer, and inventing one

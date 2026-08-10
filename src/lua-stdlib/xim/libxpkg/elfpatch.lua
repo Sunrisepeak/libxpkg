@@ -433,6 +433,40 @@ local function _apply_shrink(patch_tool, filepath, shrink, result)
     end
 end
 
+-- Which dynamic tag a search path gets stamped in, and why it is one decision
+-- in one place.
+--
+-- `patchelf --set-rpath` writes DT_RUNPATH by default; `--force-rpath` writes
+-- DT_RPATH. The difference is not stylistic:
+--
+--   DT_RPATH is consulted for EVERY dlopen anywhere in the process, however
+--   deep. DT_RUNPATH is consulted only for the object that carries it.
+--
+-- The graphics stack's load chain is three to four dlopens deep -- glvnd
+-- dlopens a vendor, the vendor dlopens its external platform modules, those
+-- dlopen their own dependencies -- and only the transitive tag reaches the
+-- bottom. Measured on an NVIDIA host: identical path content, DT_RPATH gets
+-- GLX, EGL, GLESv2 and headless surfaceless EGL all on the GPU with no
+-- environment variable and no change to any recipe; DT_RUNPATH gets llvmpipe.
+--
+-- EXECUTABLES ONLY. Forcing DT_RPATH on a LIBRARY is measured harmful
+-- (xim-pkgindex#593): transitivity is downward too, so a library's RPATH
+-- enters every lookup made beneath it, and the NVIDIA EGL interposer stamped
+-- that way fails `eglInitialize` outright. PT_INTERP is the predicate -- the
+-- same one that already decides whether to set the interpreter.
+--
+-- WHY THIS FUNCTION EXISTS AT ALL, rather than the flag being inlined twice:
+-- before this, the tag was decided by whoever happened to patch last. One
+-- recipe in the whole index -- godot -- called `patchelf --force-rpath` by
+-- hand to flip what this module stamped, documented exactly why, and was the
+-- only program in the stack observed to render on the GPU. 1 of 73 installed
+-- executables carried the right tag; 55 of the other 68 already carried the
+-- right PATH. The knowledge existed and had no way to reach the other 68.
+-- A per-package decision is not a decision, it is 73 chances to be wrong.
+local function _rpath_flags(is_executable)
+    return is_executable and " --force-rpath" or ""
+end
+
 -- Patch directories as executables (interpreter + rpath). Files without
 -- PT_INTERP (shared libs that happened to land in a bin dir, static
 -- binaries) get rpath-only treatment instead of failing the whole entry.
@@ -455,12 +489,18 @@ local function _patch_elf_executables(patch_tool, dirs, install_dir, loader, rpa
         for _, filepath in ipairs(targets) do
             result.scanned = result.scanned + 1
             local ok = true
+            -- Computed BEFORE the rpath, because it now decides the tag as
+            -- well as the interpreter. It was already being computed for the
+            -- interpreter a few lines down, so this costs nothing when a
+            -- loader is set and one `--print-interpreter` per file when not.
+            local is_exe = _has_pt_interp(filepath, patch_tool)
             if rpath and rpath ~= "" then
                 ok = _exec_ok(_shell_quote(patch_tool.program)
                     .. " --set-rpath " .. _shell_quote(rpath)
+                    .. _rpath_flags(is_exe)
                     .. " " .. _shell_quote(filepath))
             end
-            if ok and loader and _has_pt_interp(filepath, patch_tool) then
+            if ok and loader and is_exe then
                 ok = _exec_ok(_shell_quote(patch_tool.program)
                     .. " --set-interpreter " .. _shell_quote(loader)
                     .. " " .. _shell_quote(filepath))
@@ -559,6 +599,7 @@ local function _patch_elf(target, opts, result)
             if rpath and rpath ~= "" then
                 if _exec_ok(_shell_quote(patch_tool.program)
                     .. " --set-rpath " .. _shell_quote(rpath)
+                    .. _rpath_flags(has_interp)
                     .. " " .. _shell_quote(filepath)) then
                     any_ok = true
                 end

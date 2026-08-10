@@ -619,6 +619,123 @@ TEST(ExecutorTest, ApplyElfpatchAuto_LinuxUsesPatchelfForElf) {
     fs::remove_all(temp_dir);
 }
 
+// The tag an executable's search path is stamped in decides whether the
+// graphics stack works, and it is one decision that must be made in one place.
+//
+// `patchelf --set-rpath` writes DT_RUNPATH by default. DT_RUNPATH is consulted
+// only for the object carrying it; DT_RPATH is consulted for every dlopen
+// anywhere in the process. The graphics stack's load chain is three to four
+// dlopens deep -- glvnd dlopens a vendor, the vendor dlopens its external
+// platform modules, those dlopen their own dependencies -- so only the
+// transitive tag reaches the bottom. Measured on an NVIDIA host: the same path
+// content stamped DT_RPATH puts GLX, EGL, GLESv2 and headless surfaceless EGL
+// all on the GPU with no environment variable and no recipe change; stamped
+// DT_RUNPATH it renders on llvmpipe.
+//
+// Before this, the tag was whatever the last writer left. One recipe in the
+// whole index flipped it by hand, and that one package was the only program in
+// the stack observed to render on the GPU -- 1 of 73 installed executables had
+// the right tag while 55 of the other 68 already had the right PATH.
+//
+// The second assertion is the load-bearing one. Forcing DT_RPATH on a LIBRARY
+// is measured HARMFUL (xim-pkgindex#593): transitivity runs downward too, so a
+// library's RPATH enters every lookup made beneath it, and the NVIDIA EGL
+// interposer stamped that way fails eglInitialize outright. PT_INTERP is the
+// predicate that separates the two, and it is the same predicate that already
+// decides whether to set an interpreter.
+TEST(ExecutorTest, ApplyElfpatchAuto_ForcesRpathOnExecutablesOnly) {
+#ifdef _WIN32
+    GTEST_SKIP() << "Linux tool emulation test is POSIX-specific";
+#endif
+
+    const fs::path temp_dir = make_temp_dir("libxpkg-elfpatch-tag-");
+    const fs::path tools_dir = temp_dir / "tools";
+    const fs::path install_dir = temp_dir / "install";
+    const fs::path log_path = temp_dir / "tool.log";
+    const fs::path pkg_path = temp_dir / "elfpatch-tag.lua";
+
+    fs::create_directories(tools_dir);
+    // A lib dir must exist: it is what becomes the rpath, and with no rpath to
+    // stamp `--set-rpath` is never invoked and this test would pass vacuously.
+    fs::create_directories(install_dir / "lib");
+
+    // The stub answers --print-interpreter by filename, so the test drives the
+    // real predicate rather than asserting on a hardcoded branch.
+    write_executable_script(tools_dir / "patchelf",
+                            "#!/bin/sh\n"
+                            "printf 'patchelf %s\\n' \"$*\" >> \"$ELFPATCH_LOG\"\n"
+                            "if [ \"$1\" = \"--print-interpreter\" ]; then\n"
+                            "  case \"$2\" in *demo-exe*) echo /lib64/ld-linux-x86-64.so.2 ;; esac\n"
+                            "fi\n"
+                            "exit 0\n");
+
+    auto write_elf = [](const fs::path& p) {
+        std::ofstream f(p, std::ios::binary);
+        const unsigned char magic[] = {0x7f, 'E', 'L', 'F', 0, 0, 0, 0};
+        f.write(reinterpret_cast<const char*>(magic), sizeof(magic));
+        f.close();
+        fs::permissions(p,
+                        fs::perms::owner_read | fs::perms::owner_write | fs::perms::owner_exec,
+                        fs::perm_options::replace);
+    };
+    write_elf(install_dir / "demo-exe");
+    write_elf(install_dir / "demo-lib.so");
+
+    write_text(pkg_path,
+               "package = { spec = \"1\", name = \"elfpatch-tag\", xpm = { linux = { [\"latest\"] = { ref = \"1.0.0\" }, [\"1.0.0\"] = { url = \"https://example.com/demo.tar.gz\", sha256 = \"0\" } } } }\n"
+               "local elfpatch = import(\"xim.libxpkg.elfpatch\")\n"
+               "function install()\n"
+               "    elfpatch.auto({ enable = true })\n"
+               "    return true\n"
+               "end\n");
+
+    const std::string original_path = std::getenv("PATH") ? std::getenv("PATH") : "";
+    ScopedEnvVar path_env("PATH", tools_dir.string() + ":" + original_path);
+    ScopedEnvVar log_env("ELFPATCH_LOG", log_path.string());
+
+    auto exec = create_executor(pkg_path);
+    ASSERT_TRUE(exec.has_value()) << (exec ? "" : exec.error());
+
+    auto hook_result = exec->run_hook(HookType::Install, make_context(install_dir, "linux", tools_dir));
+    ASSERT_TRUE(hook_result.success) << hook_result.error;
+
+    auto patch_result = exec->apply_elfpatch_auto();
+    EXPECT_TRUE(patch_result.success) << patch_result.error;
+
+    std::ifstream log_file(log_path);
+    std::ostringstream log_buffer;
+    log_buffer << log_file.rdbuf();
+    const std::string log = log_buffer.str();
+
+    // Each --set-rpath line names exactly one file; find the two and read the
+    // flag off each. Searching the whole log for "--force-rpath" would pass
+    // even if the flag landed on the library and not the executable.
+    auto rpath_line_for = [&](const std::string& name) -> std::string {
+        std::istringstream in(log);
+        std::string line;
+        while (std::getline(in, line)) {
+            if (line.find("--set-rpath") != std::string::npos
+                && line.find(name) != std::string::npos) {
+                return line;
+            }
+        }
+        return {};
+    };
+
+    const std::string exe_line = rpath_line_for("demo-exe");
+    const std::string lib_line = rpath_line_for("demo-lib.so");
+    ASSERT_FALSE(exe_line.empty()) << "no --set-rpath recorded for the executable\n" << log;
+    ASSERT_FALSE(lib_line.empty()) << "no --set-rpath recorded for the library\n" << log;
+
+    EXPECT_NE(exe_line.find("--force-rpath"), std::string::npos)
+        << "an executable stamped DT_RUNPATH cannot reach what it dlopens:\n" << exe_line;
+    EXPECT_EQ(lib_line.find("--force-rpath"), std::string::npos)
+        << "a library stamped DT_RPATH poisons every lookup beneath it "
+           "(xim-pkgindex#593):\n" << lib_line;
+
+    fs::remove_all(temp_dir);
+}
+
 // A driver vendor library is the host's file: a symlink into /usr/lib, coupled
 // to the host's kernel module, and not ours to put an RPATH on. The historical
 // answer was to put OUR libraries on LD_LIBRARY_PATH so the vendor could find

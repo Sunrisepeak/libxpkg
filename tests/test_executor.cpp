@@ -2599,3 +2599,324 @@ TEST(ExecutorTest, SubosEnv_ProbeMustTestTypeBecauseUnknownModulesAreTruthy) {
     EXPECT_EQ(ops[3].name, "absent.typed.false");
     fs::remove_all(dir);
 }
+
+// The shape gcc.lua and llvm.lua actually use, and the shape they should use.
+//
+// Both declare `xim:glibc@>=2.39` and then ask `dep_install_dir("glibc")` --
+// bare and unversioned. 0.0.55 made explicit dependency stores the resolver
+// for this path, and they answer only an exact NAMESPACED coordinate, so the
+// call started returning nil. Silently: a recipe cannot tell that from "the
+// dependency is not installed". Measured under xlings 2026.8.10.1 -- gcc's
+// config hook reported "glibc payload not found" on a home where glibc was
+// installed, and gcc could not install on Linux.
+//
+// nil is the right answer for a bare name (guessing between `compat-x-zlib`
+// and `other-x-zlib` is the decoy problem these roots remove). Saying nothing
+// was not. And the query IS answerable the moment the caller names the
+// dependency the way it declared it.
+TEST(ExecutorTest, PkgInfo_NamespacedUnversionedQueryUsesResolvedRecord) {
+    const fs::path tempDir = make_temp_dir("libxpkg-pkginfo-ns-noversion-");
+    const fs::path registryRoot = tempDir / "registry" / "data" / "xpkgs";
+    const fs::path glibcPayload = registryRoot / "xim-x-glibc" / "2.44";
+    const fs::path memberPayload = tempDir / "member" / "data" / "xpkgs" /
+                                   "consumer" / "1.0.0";
+    const fs::path pkgPath = tempDir / "consumer.lua";
+    fs::create_directories(glibcPayload);
+    fs::create_directories(memberPayload);
+
+    write_text(pkgPath,
+        "package = { spec = \"1\", name = \"consumer\", xpm = { linux = { [\"1.0.0\"] = {} } } }\n"
+        "local pkginfo = import(\"xim.libxpkg.pkginfo\")\n"
+        "function install()\n"
+        "    local got = pkginfo.dep_install_dir(\"xim:glibc\")\n"
+        "    assert(got ~= nil, \"namespaced unversioned query resolved to nil\")\n"
+        "    assert(got:find(\"xim-x-glibc\", 1, true) ~= nil, got)\n"
+        "    return true\n"
+        "end\n");
+
+    auto exec = create_executor(pkgPath);
+    ASSERT_TRUE(exec.has_value()) << (exec ? "" : exec.error());
+    auto ctx = make_context(memberPayload, "linux");
+    ctx.dependency_store_roots = {registryRoot};
+    ctx.resolved_deps["xim:glibc@>=2.39"] = ResolvedDep {
+        .spec = "xim:glibc@>=2.39",
+        .name = "xim:glibc",
+        .version = "2.44",
+        .install_dir = glibcPayload.string(),
+        .libdirs = {},
+        .source = "plan-range",
+    };
+
+    auto result = exec->run_hook(HookType::Install, ctx);
+    EXPECT_TRUE(result.success) << result.error << "\n" << result.output;
+}
+
+// The bare form still returns nil -- and now says why, and what to write
+// instead. "Cannot answer" and "not installed" must not look the same.
+TEST(ExecutorTest, PkgInfo_BareNameUnderExplicitRootsExplainsItself) {
+    const fs::path tempDir = make_temp_dir("libxpkg-pkginfo-bare-explains-");
+    const fs::path registryRoot = tempDir / "registry" / "data" / "xpkgs";
+    const fs::path memberPayload = tempDir / "member" / "data" / "xpkgs" /
+                                   "consumer" / "1.0.0";
+    const fs::path pkgPath = tempDir / "consumer.lua";
+    fs::create_directories(registryRoot / "xim-x-glibc" / "2.44");
+    fs::create_directories(memberPayload);
+
+    write_text(pkgPath,
+        "package = { spec = \"1\", name = \"consumer\", xpm = { linux = { [\"1.0.0\"] = {} } } }\n"
+        "local pkginfo = import(\"xim.libxpkg.pkginfo\")\n"
+        "function install()\n"
+        "    local got = pkginfo.dep_install_dir(\"glibc\")\n"
+        "    assert(got == nil, \"bare name guessed: \" .. tostring(got))\n"
+        "    return true\n"
+        "end\n");
+
+    auto exec = create_executor(pkgPath);
+    ASSERT_TRUE(exec.has_value()) << (exec ? "" : exec.error());
+    auto ctx = make_context(memberPayload, "linux");
+    ctx.dependency_store_roots = {registryRoot};
+
+    auto result = exec->run_hook(HookType::Install, ctx);
+    EXPECT_TRUE(result.success) << result.error << "\n" << result.output;
+    EXPECT_NE(result.output.find("bare name cannot be resolved"),
+              std::string::npos)
+        << "a bare-name miss must explain itself:\n" << result.output;
+    EXPECT_NE(result.output.find("ns:glibc"), std::string::npos)
+        << "the diagnostic must show the call that would work:\n"
+        << result.output;
+}
+
+// ...and the guarantee 0.0.55 added is untouched: an EXACT,
+// NAMESPACED coordinate that the supplied roots do not contain is a definite
+// no. If this fell through to the scan, a same-bare-name decoy elsewhere would
+// answer it -- which is the whole thing explicit roots exist to prevent.
+TEST(ExecutorTest, PkgInfo_ExactNamespacedCoordinateStillFailsClosed) {
+    const fs::path tempDir = make_temp_dir("libxpkg-pkginfo-exact-closed-");
+    const fs::path registryRoot = tempDir / "registry" / "data" / "xpkgs";
+    const fs::path memberXpkgs = tempDir / "member" / "data" / "xpkgs";
+    const fs::path decoy = memberXpkgs / "other-x-zlib" / "1.3.2";
+    const fs::path memberPayload = memberXpkgs / "consumer" / "1.0.0";
+    const fs::path pkgPath = tempDir / "consumer.lua";
+    fs::create_directories(registryRoot);
+    fs::create_directories(decoy);
+    fs::create_directories(memberPayload);
+
+    write_text(pkgPath,
+        "package = { spec = \"1\", name = \"consumer\", xpm = { linux = { [\"1.0.0\"] = {} } } }\n"
+        "local pkginfo = import(\"xim.libxpkg.pkginfo\")\n"
+        "function install()\n"
+        "    local got = pkginfo.dep_install_dir(\"compat:zlib\", \"1.3.2\")\n"
+        "    assert(got == nil, \"exact coordinate fell through to: \" .. tostring(got))\n"
+        "    return true\n"
+        "end\n");
+
+    auto exec = create_executor(pkgPath);
+    ASSERT_TRUE(exec.has_value()) << (exec ? "" : exec.error());
+    auto ctx = make_context(memberPayload, "linux");
+    ctx.dependency_store_roots = {registryRoot};
+
+    auto result = exec->run_hook(HookType::Install, ctx);
+    EXPECT_TRUE(result.success) << result.error << "\n" << result.output;
+}
+
+// ── the #524 regression itself ───────────────────────────────────────────
+//
+// Everything above tests the case where `resolved_deps` genuinely cannot
+// answer. This is the case where it CAN, and 0.0.55 refused anyway.
+//
+// gcc.lua declares `xim:glibc@>=2.39` and asks `dep_install_dir("glibc")`.
+// The record is right there, under a bare name that nothing else in the table
+// claims. 0.0.55 rejected it because the QUESTION was underspecified, not
+// because the ANSWER was ambiguous -- and the uniqueness guard that decides
+// ambiguity was already present and already failing closed. Measured: 6 of
+// the 7 real call sites in xim-pkgindex returned nil; gcc and meson could not
+// install on any cold home.
+TEST(ExecutorTest, PkgInfo_BareUnversionedResolvesWhenTheRecordIsUnique) {
+    const fs::path tempDir = make_temp_dir("libxpkg-pkginfo-bare-unique-");
+    const fs::path registryRoot = tempDir / "registry" / "data" / "xpkgs";
+    const fs::path glibcPayload = registryRoot / "xim-x-glibc" / "2.44";
+    const fs::path memberPayload = tempDir / "member" / "data" / "xpkgs" /
+                                   "consumer" / "1.0.0";
+    const fs::path pkgPath = tempDir / "consumer.lua";
+    fs::create_directories(glibcPayload);
+    fs::create_directories(memberPayload);
+
+    write_text(pkgPath,
+        "package = { spec = \"1\", name = \"consumer\", xpm = { linux = { [\"1.0.0\"] = {} } } }\n"
+        "local pkginfo = import(\"xim.libxpkg.pkginfo\")\n"
+        "function install()\n"
+        "    local got = pkginfo.dep_install_dir(\"glibc\")\n"
+        "    assert(got ~= nil, \"the unique record did not answer\")\n"
+        "    assert(got:find(\"xim-x-glibc\", 1, true) ~= nil, got)\n"
+        "    return true\n"
+        "end\n");
+
+    auto exec = create_executor(pkgPath);
+    ASSERT_TRUE(exec.has_value()) << (exec ? "" : exec.error());
+    auto ctx = make_context(memberPayload, "linux");
+    ctx.dependency_store_roots = {registryRoot};
+    ctx.resolved_deps["xim:glibc@>=2.39"] = ResolvedDep {
+        .spec = "xim:glibc@>=2.39",
+        .name = "xim:glibc",
+        .version = "2.44",
+        .install_dir = glibcPayload.string(),
+        .libdirs = {},
+        .source = "plan-range",
+    };
+
+    auto result = exec->run_hook(HookType::Install, ctx);
+    EXPECT_TRUE(result.success) << result.error << "\n" << result.output;
+}
+
+// A caller may restate the version, and what it restates is the RANGE the
+// recipe declared -- not the concrete version the resolver picked. Comparing
+// those as strings makes them unequal, which is openxlings/xlings#481 again:
+// there `xim:glibc@>=2.38` matched no plan node, so nothing got an RPATH and
+// the package installed reporting success.
+TEST(ExecutorTest, PkgInfo_BareWithRangeMatchesTheResolversConcretePick) {
+    const fs::path tempDir = make_temp_dir("libxpkg-pkginfo-bare-range-");
+    const fs::path registryRoot = tempDir / "registry" / "data" / "xpkgs";
+    const fs::path glibcPayload = registryRoot / "xim-x-glibc" / "2.44";
+    const fs::path memberPayload = tempDir / "member" / "data" / "xpkgs" /
+                                   "consumer" / "1.0.0";
+    const fs::path pkgPath = tempDir / "consumer.lua";
+    fs::create_directories(glibcPayload);
+    fs::create_directories(memberPayload);
+
+    write_text(pkgPath,
+        "package = { spec = \"1\", name = \"consumer\", xpm = { linux = { [\"1.0.0\"] = {} } } }\n"
+        "local pkginfo = import(\"xim.libxpkg.pkginfo\")\n"
+        "function install()\n"
+        "    local hit = pkginfo.dep_install_dir(\"glibc\", \">=2.39\")\n"
+        "    assert(hit ~= nil, \"a range did not match the resolved 2.44\")\n"
+        "    -- ...and a version the record does NOT satisfy is still a miss.\n"
+        "    local miss = pkginfo.dep_install_dir(\"glibc\", \"2.39\")\n"
+        "    assert(miss == nil, \"wrong exact version matched: \" .. tostring(miss))\n"
+        "    return true\n"
+        "end\n");
+
+    auto exec = create_executor(pkgPath);
+    ASSERT_TRUE(exec.has_value()) << (exec ? "" : exec.error());
+    auto ctx = make_context(memberPayload, "linux");
+    ctx.dependency_store_roots = {registryRoot};
+    ctx.resolved_deps["xim:glibc@>=2.39"] = ResolvedDep {
+        .spec = "xim:glibc@>=2.39",
+        .name = "xim:glibc",
+        .version = "2.44",
+        .install_dir = glibcPayload.string(),
+        .libdirs = {},
+        .source = "plan-range",
+    };
+
+    auto result = exec->run_hook(HookType::Install, ctx);
+    EXPECT_TRUE(result.success) << result.error << "\n" << result.output;
+}
+
+// Ambiguity is what fails closed -- and it must name both providers. "not
+// found" would send the reader looking for a missing payload when the payload
+// is there twice.
+//
+// It must ALSO not repeat the bare-name advice underneath. That message says
+// "you did not name a namespace"; here the caller's real problem is that two
+// namespaces answer, and stacking the generic advice on top points at the
+// wrong fix.
+TEST(ExecutorTest, PkgInfo_TwoProvidersOfOneBareNameFailClosedAndNameBoth) {
+    const fs::path tempDir = make_temp_dir("libxpkg-pkginfo-ambiguous-");
+    const fs::path registryRoot = tempDir / "registry" / "data" / "xpkgs";
+    const fs::path compatZlib = registryRoot / "compat-x-zlib" / "1.3";
+    const fs::path otherZlib = registryRoot / "other-x-zlib" / "1.3";
+    const fs::path memberPayload = tempDir / "member" / "data" / "xpkgs" /
+                                   "consumer" / "1.0.0";
+    const fs::path pkgPath = tempDir / "consumer.lua";
+    fs::create_directories(compatZlib);
+    fs::create_directories(otherZlib);
+    fs::create_directories(memberPayload);
+
+    write_text(pkgPath,
+        "package = { spec = \"1\", name = \"consumer\", xpm = { linux = { [\"1.0.0\"] = {} } } }\n"
+        "local pkginfo = import(\"xim.libxpkg.pkginfo\")\n"
+        "function install()\n"
+        "    local got = pkginfo.dep_install_dir(\"zlib\")\n"
+        "    assert(got == nil, \"ambiguous name guessed: \" .. tostring(got))\n"
+        "    -- naming the namespace resolves it, which is the advice we print\n"
+        "    local ok = pkginfo.dep_install_dir(\"compat:zlib\")\n"
+        "    assert(ok ~= nil and ok:find(\"compat-x-zlib\", 1, true) ~= nil,\n"
+        "           \"namespaced form did not resolve: \" .. tostring(ok))\n"
+        "    return true\n"
+        "end\n");
+
+    auto exec = create_executor(pkgPath);
+    ASSERT_TRUE(exec.has_value()) << (exec ? "" : exec.error());
+    auto ctx = make_context(memberPayload, "linux");
+    ctx.dependency_store_roots = {registryRoot};
+    ctx.resolved_deps["compat:zlib@1.3"] = ResolvedDep {
+        .spec = "compat:zlib@1.3",
+        .name = "compat:zlib",
+        .version = "1.3",
+        .install_dir = compatZlib.string(),
+        .libdirs = {},
+        .source = "plan-exact",
+    };
+    ctx.resolved_deps["other:zlib@1.3"] = ResolvedDep {
+        .spec = "other:zlib@1.3",
+        .name = "other:zlib",
+        .version = "1.3",
+        .install_dir = otherZlib.string(),
+        .libdirs = {},
+        .source = "plan-exact",
+    };
+
+    auto result = exec->run_hook(HookType::Install, ctx);
+    EXPECT_TRUE(result.success) << result.error << "\n" << result.output;
+    EXPECT_NE(result.output.find("ambiguous"), std::string::npos)
+        << "a collision must say so:\n" << result.output;
+    EXPECT_NE(result.output.find("compat:zlib"), std::string::npos)
+        << "the diagnostic must name the providers:\n" << result.output;
+    EXPECT_NE(result.output.find("other:zlib"), std::string::npos)
+        << "the diagnostic must name the providers:\n" << result.output;
+    EXPECT_EQ(result.output.find("bare name cannot be resolved"),
+              std::string::npos)
+        << "the generic bare-name advice points at the wrong fix here:\n"
+        << result.output;
+}
+
+// Widening the match must NOT weaken the payload check 0.0.55 added: a record
+// whose install_dir is not on disk is a definite no, with its own message.
+// Returning the path anyway is how a hook proceeds against a directory that
+// does not exist and blames something further downstream.
+TEST(ExecutorTest, PkgInfo_UniqueRecordWithNoPayloadOnDiskIsStillAMiss) {
+    const fs::path tempDir = make_temp_dir("libxpkg-pkginfo-no-payload-");
+    const fs::path registryRoot = tempDir / "registry" / "data" / "xpkgs";
+    const fs::path memberPayload = tempDir / "member" / "data" / "xpkgs" /
+                                   "consumer" / "1.0.0";
+    const fs::path pkgPath = tempDir / "consumer.lua";
+    fs::create_directories(registryRoot);
+    fs::create_directories(memberPayload);
+
+    write_text(pkgPath,
+        "package = { spec = \"1\", name = \"consumer\", xpm = { linux = { [\"1.0.0\"] = {} } } }\n"
+        "local pkginfo = import(\"xim.libxpkg.pkginfo\")\n"
+        "function install()\n"
+        "    local got = pkginfo.dep_install_dir(\"glibc\")\n"
+        "    assert(got == nil, \"answered with an absent payload: \" .. tostring(got))\n"
+        "    return true\n"
+        "end\n");
+
+    auto exec = create_executor(pkgPath);
+    ASSERT_TRUE(exec.has_value()) << (exec ? "" : exec.error());
+    auto ctx = make_context(memberPayload, "linux");
+    ctx.dependency_store_roots = {registryRoot};
+    ctx.resolved_deps["xim:glibc@>=2.39"] = ResolvedDep {
+        .spec = "xim:glibc@>=2.39",
+        .name = "xim:glibc",
+        .version = "2.44",
+        .install_dir = (registryRoot / "xim-x-glibc" / "2.44").string(),
+        .libdirs = {},
+        .source = "plan-range",
+    };
+
+    auto result = exec->run_hook(HookType::Install, ctx);
+    EXPECT_TRUE(result.success) << result.error << "\n" << result.output;
+    EXPECT_NE(result.output.find("missing payload"), std::string::npos)
+        << "an absent payload must say so:\n" << result.output;
+}

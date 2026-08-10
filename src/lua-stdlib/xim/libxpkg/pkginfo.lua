@@ -221,6 +221,20 @@ local function _resolve_dep_via_xvm(dep_name, dep_version)
     return nil
 end
 
+-- Does an installed version answer what the caller asked for?
+--
+-- The version half of a dep is an EXPRESSION -- `2.39`, `>=2.38`, `^1.2` -- and
+-- comparing it to a concrete version as a string makes them unequal. That is
+-- the same mistake as openxlings/xlings#481, where `xim:glibc@>=2.38` matched
+-- no plan node, so nothing got an RPATH and the package installed reporting
+-- success. Omitting the version means "whatever the resolver picked", which is
+-- the whole reason a resolver record exists.
+local function _version_matches_request(have, want)
+    if want == nil or want == "" then return true end
+    if have == want then return true end
+    return _version_satisfies(have, want)
+end
+
 -- The resolver's record for a dependency, if this client sends one.
 --
 -- type(), not truthiness: an unknown _RUNTIME field is nil here, but the same
@@ -229,21 +243,51 @@ end
 -- xim.pkgindex.sysroot).
 --
 -- Namespaced requests match their exact spec/canonical identity. Bare requests
--- retain compatibility only when an exact requested version selects precisely
--- one canonical resolver record; namespace collisions fail closed.
+-- are answered when the record set answers them UNIQUELY.
+--
+-- Returns the record, or nil plus a reason ("ambiguous") the caller can use to
+-- avoid explaining the same failure twice. Extra return values are ignored by
+-- every existing caller, so this stays additive.
+--
+-- 0.0.55 gated the bare branch on `_is_exact_store_version(dep_version)` as
+-- well. That precondition disambiguated NOTHING -- the uniqueness guard below
+-- was already there and already failed closed -- and its only effect was to
+-- reject the unversioned query, which is the shape every recipe in the index
+-- actually writes. Measured (openxlings/xlings#524): 6 of the 7 real
+-- `dep_install_dir` call sites returned nil, gcc and meson could not install on
+-- any cold home at all, and godot silently fell back to the host's GL.
+--
+-- The distinction that matters: ambiguity is a property of the RECORD SET, not
+-- of how specific the question was. `resolved_deps` is a closed table of this
+-- package's own declared deps, so "is there a second record with this bare
+-- name" is decidable here. That is exactly what makes it different from the
+-- explicit store roots below, where refusing to guess IS the right answer.
 function M.resolved_dep(dep_name, dep_version)
     local t = _RUNTIME and _RUNTIME.resolved_deps
     if type(t) ~= "table" then return nil end
     local ns, bare = _parse_namespace(dep_name)
     if not ns then
-        if not _is_exact_store_version(dep_version) then return nil end
-        local candidate = nil
+        local candidate, candidate_name = nil, nil
         for spec, rec in pairs(t) do
             local canonical = rec.name or spec:gsub("@.*", "")
             local _, record_bare = _parse_namespace(canonical)
-            if record_bare == bare and rec.version == dep_version then
-                if candidate then return nil end
-                candidate = rec
+            if record_bare == bare
+               and _version_matches_request(rec.version, dep_version) then
+                -- Two providers, one bare name: fail closed -- and name them.
+                -- "not found" would send the reader looking for a missing
+                -- payload when the payload is there twice.
+                if candidate then
+                    local log = _get_log()
+                    if log then
+                        log.error("dep_install_dir(%s): ambiguous -- %s and %s "
+                                  .. "both provide this name. Pass the "
+                                  .. "namespaced coordinate, as declared.",
+                                  tostring(dep_name), tostring(candidate_name),
+                                  tostring(canonical))
+                    end
+                    return nil, "ambiguous"
+                end
+                candidate, candidate_name = rec, canonical
             end
         end
         return candidate
@@ -256,9 +300,11 @@ function M.resolved_dep(dep_name, dep_version)
     for spec, rec in pairs(t) do
         local sname = spec:gsub("@.*", "")
         if sname == dep_name then
-            if not dep_version or dep_version == ""
-               or spec == dep_name .. "@" .. dep_version
-               or rec.version == dep_version then
+            -- Same range rule as the bare branch. Asking for `>=2.38` when the
+            -- recipe declared `>=2.39` is a legitimate question with the same
+            -- answer; string equality called it a miss.
+            if spec == dep_name .. "@" .. (dep_version or "")
+               or _version_matches_request(rec.version, dep_version) then
                 return rec
             end
         end
@@ -278,7 +324,7 @@ end
 -- with no diagnostic. See
 -- xlings/.agents/docs/2026-08-05-dependency-resolution-single-source.md
 function M.dep_install_dir(dep_name, dep_version)
-    local rec = M.resolved_dep(dep_name, dep_version)
+    local rec, why = M.resolved_dep(dep_name, dep_version)
     if rec then
         if rec.install_dir and rec.install_dir ~= ""
            and os.isdir(rec.install_dir) then
@@ -295,7 +341,59 @@ function M.dep_install_dir(dep_name, dep_version)
 
     local roots = _RUNTIME and _RUNTIME.dependency_store_roots
     if type(roots) == "table" then
-        return _resolve_dep_via_explicit_roots(dep_name, dep_version)
+        local hit = _resolve_dep_via_explicit_roots(dep_name, dep_version)
+        if hit then return hit end
+
+        -- Explicit roots answer an EXACT, NAMESPACED coordinate and nothing
+        -- else, on purpose: a bare `zlib` would have to pick between
+        -- `compat-x-zlib` and `other-x-zlib`, and guessing is the decoy problem
+        -- these roots exist to remove. So nil is the right ANSWER here.
+        --
+        -- It was the wrong SILENCE. 0.0.55 returned nil for an underspecified
+        -- query with no word to the caller, and a recipe cannot tell that from
+        -- "the dependency is not installed".
+        --
+        -- Reaching here now means `resolved_deps` genuinely could not answer:
+        -- the dependency was never declared by this package (a transitive dep,
+        -- or a payload some hook installed itself). A bare name additionally
+        -- cannot be looked up in the roots, because they key on an exact
+        -- namespaced coordinate. Say which of the two it is.
+        --
+        -- `why == "ambiguous"` is the third case, and it already printed a
+        -- better message naming both providers -- repeating "a bare name
+        -- cannot be resolved" underneath it would point at the wrong fix.
+        local ns = _parse_namespace(dep_name)
+        local log = _get_log()
+        if log and _RUNTIME and _RUNTIME.install_dir and why ~= "ambiguous" then
+            if not ns then
+                log.error("dep_install_dir(%s): a bare name cannot be resolved "
+                          .. "against explicit dependency stores -- it does not "
+                          .. "say which namespace. Pass the coordinate as "
+                          .. "declared, e.g. \"ns:%s\".",
+                          tostring(dep_name), tostring(dep_name))
+            elseif dep_version == nil or dep_version == "" then
+                -- Namespaced, no version, and no record. "Pass an exact
+                -- version" -- what this used to say -- is circular advice: the
+                -- caller omitted the version precisely so the resolver's own
+                -- choice would be used, and the real problem is that there is
+                -- no record to choose from. Name that instead.
+                log.error("dep_install_dir(%s): %s is not a declared "
+                          .. "dependency of %s, so the resolver has no record "
+                          .. "of it. Declare it in `deps`, or use "
+                          .. "tool_payload_dir if this hook installed it "
+                          .. "itself. Declared here: %s",
+                          tostring(dep_name), tostring(dep_name),
+                          tostring(M.name() or "this package"),
+                          (#M.deps_list() > 0
+                             and table.concat(M.deps_list(), ", ") or "<none>"))
+            elseif not _is_exact_store_version(dep_version) then
+                log.error("dep_install_dir(%s, %s): explicit dependency stores "
+                          .. "need an exact version. Omit the version to use "
+                          .. "the resolved dependency record instead.",
+                          tostring(dep_name), tostring(dep_version))
+            end
+        end
+        return nil
     end
 
     local result = _resolve_dep_via_scan(dep_name, dep_version)

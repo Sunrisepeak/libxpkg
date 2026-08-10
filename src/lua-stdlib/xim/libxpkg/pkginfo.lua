@@ -371,6 +371,21 @@ function M.dep_install_dir(dep_name, dep_version)
                           .. "say which namespace. Pass the coordinate as "
                           .. "declared, e.g. \"ns:%s\".",
                           tostring(dep_name), tostring(dep_name))
+            elseif dep_version == nil or dep_version == "" then
+                -- Namespaced, no version, and no record. "Pass an exact
+                -- version" -- what this used to say -- is circular advice: the
+                -- caller omitted the version precisely so the resolver's own
+                -- choice would be used, and the real problem is that there is
+                -- no record to choose from. Name that instead.
+                log.error("dep_install_dir(%s): %s is not a declared "
+                          .. "dependency of %s, so the resolver has no record "
+                          .. "of it. Declare it in `deps`, or use "
+                          .. "tool_payload_dir if this hook installed it "
+                          .. "itself. Declared here: %s",
+                          tostring(dep_name), tostring(dep_name),
+                          tostring(M.name() or "this package"),
+                          (#M.deps_list() > 0
+                             and table.concat(M.deps_list(), ", ") or "<none>"))
             elseif not _is_exact_store_version(dep_version) then
                 log.error("dep_install_dir(%s, %s): explicit dependency stores "
                           .. "need an exact version. Omit the version to use "
